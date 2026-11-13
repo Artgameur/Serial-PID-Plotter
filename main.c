@@ -5,6 +5,7 @@
 #include "app_window.h"
 #include "screens.h"
 #include "settings.h"
+#include "profile.h"
 
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
@@ -24,6 +25,7 @@ int main()
     // simulator_mode = false: the window is resizable and the LVGL display follows its size
     // (minimum size, UI scale and max frame rate: app_window.c)
     appWindowInit(display, SCREEN_WIDTH, SCREEN_HEIGHT);
+    PROF_DO(profInit(display);)
     lv_lock();
     lv_indev_t* pointer_device = lv_windows_acquire_pointer_indev(display);
     if (!pointer_device) return -1;
@@ -40,7 +42,9 @@ int main()
     lv_unlock();
     while (1)
     {
+        PROF_START(handlerStart);
         uint32_t time_till_next = lv_timer_handler();
+        PROF_DO(profLoop(handlerStart);)
         // handle LV_NO_TIMER_READY. Another option is to always sleep a few milliseconds
         if(time_till_next == LV_NO_TIMER_READY) time_till_next = LV_DEF_REFR_PERIOD;
         lv_sleep_ms(time_till_next);

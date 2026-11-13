@@ -22,6 +22,7 @@
 #include "lang.h"
 #include "compare.h"
 #include "plotter.h"
+#include "profile.h"
 #include "serial.h"
 #include "settings.h"
 #include "ui_widgets.h"
@@ -409,6 +410,7 @@ void loadScreen(void)
   lv_timer_create(portScanTimer, PORT_SCAN_PERIOD_MS, NULL);
   lv_timer_create(logFlushTimer, LOG_FLUSH_MS, NULL);
   portScanTimer(NULL);
+  PROF_DO(profScenarioStart(tabview));
 
   lv_screen_load(screen);
 }
@@ -1227,6 +1229,8 @@ static void logInsert(const char * text)
 {
   size_t len = strlen(text);
 
+  PROF_PUSH(PROF_TERMINAL_LABEL);
+
   // Following the new text (view at the bottom): kept at the bottom after the update
   bool atBottom = lv_obj_get_scroll_bottom(rxLog) <= uiPx(4);
 
@@ -1268,6 +1272,8 @@ static void logInsert(const char * text)
     lv_obj_update_layout(rxLog);
     lv_obj_scroll_by(rxLog, 0, -lv_obj_get_scroll_bottom(rxLog), LV_ANIM_OFF);
   }
+
+  PROF_POP();
 }
 
 // Laying out the terminal text is costly: while the Serial tab is not shown, the received text
@@ -1309,6 +1315,8 @@ static void portScanTimer(lv_timer_t * tim)
     return;
   }
 
+  PROF_PUSH(PROF_PORT_SCAN);
+
   if (!lv_dropdown_is_open(portDropdown) && portsChanged())
   {
     portsRefresh();
@@ -1327,6 +1335,8 @@ static void portScanTimer(lv_timer_t * tim)
       statusUpdate();
     }
   }
+
+  PROF_POP();
 }
 
 // The PC keyboard types in the text boxes of the shown tab
@@ -1970,6 +1980,8 @@ static void serialRx(SerialPort_t * port, const uint8_t * data, uint32_t len, ui
 #endif
   plotterFeed(conn, data, len, tick);
 
+  PROF_PUSH(PROF_TERMINAL);
+
   for (uint32_t i = 0; i < len; ++i)
   {
     uint8_t c = data[i];
@@ -1991,14 +2003,12 @@ static void serialRx(SerialPort_t * port, const uint8_t * data, uint32_t len, ui
 
   text[n] = '\0';
 
-  if (n == 0)
-  {
-    return;
-  }
-
   // Several connections: each line shown with its connection (text), each received chunk on its
   // own line (hex / dec)
-  if (connCount == 1)
+  if (n == 0)
+  {
+  }
+  else if (connCount == 1)
   {
     logQueue(text);
   }
@@ -2012,6 +2022,8 @@ static void serialRx(SerialPort_t * port, const uint8_t * data, uint32_t len, ui
     snprintf(line, sizeof(line), "[C%lu] %s\n", (unsigned long) (conn + 1), text);
     logQueue(line);
   }
+
+  PROF_POP();
 }
 
 // The port was lost (ex: USB unplugged): with auto reconnect, wait for it to come back

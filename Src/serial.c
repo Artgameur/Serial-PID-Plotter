@@ -14,12 +14,15 @@
 // ------------------------------------------------------------------------------------------------
 #include "serial.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <process.h>
 #include <windows.h>
 #include <setupapi.h>
+
+#include "profile.h"
 
 // ================================================================================================
 // ================================================================================================
@@ -58,8 +61,10 @@ typedef struct
   RxChunk_t        chunks[RX_CHUNKS];
   uint32_t         head;                  // next written
   uint32_t         tail;                  // next read
+  SerialStats_t    stats;                 // under lock
   volatile LONG    lost;                  // the port failed (ex: USB unplugged)
   volatile LONG    owners;                // the open port, and the reader thread while it runs
+  bool             sim;                   // simulated port (profiling builds only)
 } SerialRx_t;
 
 // ================================================================================================
@@ -83,6 +88,10 @@ static void              serialHandleDisconnect(SerialPort_t * port);
 static unsigned __stdcall readerThread(void * arg);
 static void              chunkPush(SerialRx_t * rx, const uint8_t * data, uint32_t len, uint32_t tick);
 static void              rxRelease(SerialRx_t * rx);
+static bool              portSetup(HANDLE h, const SerialConfig_t * config, DCB * dcbOut, COMMTIMEOUTS * timeoutsOut);
+#ifdef SD_PROFILE
+static unsigned __stdcall simThread(void * arg);
+#endif
 
 // ================================================================================================
 // ================================================================================================
@@ -137,6 +146,15 @@ uint32_t serialListPorts(SerialPortInfo_t * ports, uint32_t maxPorts)
   }
 
   SetupDiDestroyDeviceInfoList(devs);
+
+#ifdef SD_PROFILE
+  for (uint32_t s = 0; (s < profSimPorts()) && (count < maxPorts); ++s, ++count)
+  {
+    snprintf(ports[count].name, SERIAL_PORT_NAME_LEN, "SIM%lu", (unsigned long) (s + 1));
+    snprintf(ports[count].description, SERIAL_PORT_DESC_LEN, "Simulated port %lu", (unsigned long) (s + 1));
+  }
+#endif
+
   return count;
 }
 
@@ -158,18 +176,80 @@ bool serialOpen(SerialPort_t * port, const char * portName, const SerialConfig_t
     return false;
   }
 
+  bool sim = false;
+#ifdef SD_PROFILE
+  // Simulated port: a stand-in handle (closed as the real one), no driver
+  sim = (profSimPorts() > 0) && (strncmp(portName, "SIM", 3) == 0);
+#endif
+
   // The "\\.\" prefix is required for COM10 and above
   snprintf(path, sizeof(path), "\\\\.\\%s", portName);
-  HANDLE h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+  HANDLE h = sim ? CreateEventW(NULL, TRUE, FALSE, NULL)
+                 : CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
 
-  if (h == INVALID_HANDLE_VALUE)
+  if ((h == INVALID_HANDLE_VALUE) || (h == NULL))
   {
     return false;
   }
 
-  if (!GetCommState(h, &dcb))
+  if (!sim && !portSetup(h, config, &dcb, &timeouts))
   {
     CloseHandle(h);
+    return false;
+  }
+
+  SerialRx_t * rx = calloc(1, sizeof(SerialRx_t));
+  if (rx == NULL)
+  {
+    CloseHandle(h);
+    return false;
+  }
+
+  InitializeCriticalSection(&rx->lock);
+  rx->port      = h;
+  rx->owners    = 1;
+  rx->sim       = sim;
+  rx->stats.capacity = RX_CHUNKS - 1;
+  rx->stopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+
+  // Re-opening an already used struct closes the previous port first
+  serialClose(port);
+
+  port->handle       = h;
+  port->rx           = rx;
+  port->config       = *config;
+  port->rxCb         = rxCb;
+  port->disconnectCb = disconnectCb;
+  port->userData     = userData;
+  snprintf(port->name, SERIAL_PORT_NAME_LEN, "%s", portName);
+
+  _beginthreadex_proc_type reader = readerThread;
+#ifdef SD_PROFILE
+  reader = sim ? simThread : readerThread;
+#endif
+
+  // The thread gets rx itself, not port: the port struct may be reused before the thread ends
+  rx->owners = 2;
+  rx->thread = (rx->stopEvent != NULL) ? (HANDLE) _beginthreadex(NULL, 0, reader, rx, 0, NULL) : NULL;
+  if (rx->thread == NULL)
+  {
+    rx->owners = 1;
+    serialClose(port);
+    return false;
+  }
+
+  port->pollTimer = lv_timer_create(serialPollCb, SERIAL_POLL_PERIOD_MS, port);
+  return true;
+}
+
+// Data format, no flow control, read timeouts of the reader thread
+static bool portSetup(HANDLE h, const SerialConfig_t * config, DCB * dcbOut, COMMTIMEOUTS * timeoutsOut)
+{
+  DCB          dcb = *dcbOut;
+  COMMTIMEOUTS timeouts = *timeoutsOut;
+
+  if (!GetCommState(h, &dcb))
+  {
     return false;
   }
 
@@ -197,46 +277,10 @@ bool serialOpen(SerialPort_t * port, const char * portName, const SerialConfig_t
 
   if (!SetCommState(h, &dcb) || !SetCommTimeouts(h, &timeouts) || !SetCommMask(h, EV_RXCHAR))
   {
-    CloseHandle(h);
     return false;
   }
 
   PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR);
-
-  SerialRx_t * rx = calloc(1, sizeof(SerialRx_t));
-  if (rx == NULL)
-  {
-    CloseHandle(h);
-    return false;
-  }
-
-  InitializeCriticalSection(&rx->lock);
-  rx->port      = h;
-  rx->owners    = 1;
-  rx->stopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-
-  // Re-opening an already used struct closes the previous port first
-  serialClose(port);
-
-  port->handle       = h;
-  port->rx           = rx;
-  port->config       = *config;
-  port->rxCb         = rxCb;
-  port->disconnectCb = disconnectCb;
-  port->userData     = userData;
-  snprintf(port->name, SERIAL_PORT_NAME_LEN, "%s", portName);
-
-  // The thread gets rx itself, not port: the port struct may be reused before the thread ends
-  rx->owners = 2;
-  rx->thread = (rx->stopEvent != NULL) ? (HANDLE) _beginthreadex(NULL, 0, readerThread, rx, 0, NULL) : NULL;
-  if (rx->thread == NULL)
-  {
-    rx->owners = 1;
-    serialClose(port);
-    return false;
-  }
-
-  port->pollTimer = lv_timer_create(serialPollCb, SERIAL_POLL_PERIOD_MS, port);
   return true;
 }
 
@@ -291,6 +335,12 @@ int32_t serialSend(SerialPort_t * port, const uint8_t * data, uint32_t len)
     return -1;
   }
 
+  // Simulated port: sent nowhere
+  if (((SerialRx_t *) port->rx)->sim)
+  {
+    return (int32_t) len;
+  }
+
   overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
   if (overlapped.hEvent == NULL)
   {
@@ -310,6 +360,23 @@ int32_t serialSend(SerialPort_t * port, const uint8_t * data, uint32_t len)
   }
 
   return (int32_t) written;
+}
+
+bool serialStatsGet(const SerialPort_t * port, SerialStats_t * stats)
+{
+  SerialRx_t * rx = serialIsOpen(port) ? (SerialRx_t *) port->rx : NULL;
+
+  memset(stats, 0, sizeof(*stats));
+
+  if (rx == NULL)
+  {
+    return false;
+  }
+
+  EnterCriticalSection(&rx->lock);
+  *stats = rx->stats;
+  LeaveCriticalSection(&rx->lock);
+  return true;
 }
 
 bool serialSendString(SerialPort_t * port, const char * str)
@@ -374,6 +441,9 @@ static void serialPollCb(lv_timer_t * tim)
   SerialPort_t * port = (SerialPort_t *) lv_timer_get_user_data(tim);
   RxChunk_t      chunk;
 
+  // Taking the chunks out; the callbacks' own stages are timed apart
+  PROF_PUSH(PROF_QUEUE);
+
   while (serialIsOpen(port) && (port->rx != NULL))
   {
     SerialRx_t * rx = (SerialRx_t *) port->rx;
@@ -385,6 +455,7 @@ static void serialPollCb(lv_timer_t * tim)
     {
       chunk    = rx->chunks[rx->tail];
       rx->tail = (rx->tail + 1) % RX_CHUNKS;
+      rx->stats.queued--;
     }
     LeaveCriticalSection(&rx->lock);
 
@@ -395,7 +466,7 @@ static void serialPollCb(lv_timer_t * tim)
       {
         serialHandleDisconnect(port);
       }
-      return;
+      break;
     }
 
     // The callback may close the port (then the loop ends)
@@ -404,6 +475,8 @@ static void serialPollCb(lv_timer_t * tim)
       port->rxCb(port, chunk.data, chunk.len, chunk.tick);
     }
   }
+
+  PROF_POP();
 }
 
 // Waits for received bytes (or the stop event), reads them and stamps them at once
@@ -422,6 +495,8 @@ static unsigned __stdcall readerThread(void * arg)
   {
     DWORD bytesRead = 0;
 
+    PROF_START(acqStart);
+
     // Everything already received (returns at once: read timeouts)
     ResetEvent(readOv.hEvent);
     if (!ReadFile(h, buffer, sizeof(buffer), &bytesRead, &readOv) &&
@@ -434,6 +509,7 @@ static unsigned __stdcall readerThread(void * arg)
     if (bytesRead > 0)
     {
       chunkPush(rx, buffer, bytesRead, lv_tick_get());
+      PROF_END_THREAD(PROF_ACQ, acqStart);
       continue;
     }
 
@@ -511,7 +587,7 @@ static void rxRelease(SerialRx_t * rx)
   free(rx);
 }
 
-// Full (the LVGL thread stalled for seconds): the chunk is dropped
+// Full (the LVGL thread stalled for seconds): the chunk is dropped (counted in the stats)
 static void chunkPush(SerialRx_t * rx, const uint8_t * data, uint32_t len, uint32_t tick)
 {
   EnterCriticalSection(&rx->lock);
@@ -526,10 +602,91 @@ static void chunkPush(SerialRx_t * rx, const uint8_t * data, uint32_t len, uint3
     chunk->len  = (uint16_t) len;
     memcpy(chunk->data, data, len);
     rx->head = next;
+
+    rx->stats.chunks++;
+    rx->stats.bytes += len;
+    rx->stats.queued++;
+    rx->stats.highWater = LV_MAX(rx->stats.highWater, rx->stats.queued);
+  }
+  else
+  {
+    rx->stats.droppedChunks++;
+    rx->stats.droppedBytes += len;
   }
 
   LeaveCriticalSection(&rx->lock);
 }
+
+#ifdef SD_PROFILE
+// Simulated port: profSimRate() lines per second, each its own chunk (as a USB device sends a
+// line per packet), through the same queue as a real port. Line: "<sequence>,<value>,...\n", the
+// sequence counting 0..999999 so lost lines can be counted (profile.c).
+static unsigned __stdcall simThread(void * arg)
+{
+  SerialRx_t *  rx      = (SerialRx_t *) arg;
+  // High resolution timer (Windows 10 1803+): 1 ms steps instead of the 15.6 ms of the system tick
+  HANDLE        timer   = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+  LARGE_INTEGER frequency;
+  LARGE_INTEGER start;
+  LARGE_INTEGER now;
+  uint64_t      sent    = 0;
+  uint32_t      rate    = profSimRate();
+  uint32_t      values  = profSimValues();
+  char          line[SERIAL_RX_BUFFER_SIZE];
+
+  if (timer == NULL)
+  {
+    timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+  }
+
+  QueryPerformanceFrequency(&frequency);
+  QueryPerformanceCounter(&start);
+
+  while (timer != NULL)
+  {
+    LARGE_INTEGER due = {.QuadPart = -10000};    // 1 ms
+    HANDLE        events[2] = {rx->stopEvent, timer};
+
+    SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
+
+    if (WaitForMultipleObjects(2, events, FALSE, INFINITE) == WAIT_OBJECT_0)
+    {
+      break;
+    }
+
+    QueryPerformanceCounter(&now);
+
+    uint64_t target = (uint64_t) (((double) (now.QuadPart - start.QuadPart) * rate) / (double) frequency.QuadPart);
+
+    // At most one second of lines per wake; behind (ex: this thread paused), it catches up: every
+    // line is sent, so a gap in the sequence numbers is a loss in the app
+    for (uint32_t n = 0; (sent < target) && (n < rate); ++n, ++sent)
+    {
+      PROF_START(acqStart);
+      double t   = (double) sent / rate;
+      int    len = snprintf(line, sizeof(line), "%lu", (unsigned long) (sent % 1000000));
+
+      for (uint32_t v = 1; (v < values) && (len < (int) sizeof(line) - 16); ++v)
+      {
+        len += snprintf(&line[len], sizeof(line) - (size_t) len, ",%.3f", 10.0 * sin((t * (v + 1)) + v) + (double) v);
+      }
+
+      line[len++] = '\n';
+      chunkPush(rx, (const uint8_t *) line, (uint32_t) len, lv_tick_get());
+      PROF_END_THREAD(PROF_ACQ, acqStart);
+    }
+
+  }
+
+  if (timer != NULL)
+  {
+    CloseHandle(timer);
+  }
+
+  rxRelease(rx);
+  return 0;
+}
+#endif
 
 static void serialHandleDisconnect(SerialPort_t * port)
 {

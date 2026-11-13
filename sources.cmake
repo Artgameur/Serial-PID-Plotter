@@ -8,6 +8,7 @@ set(APP_SOURCES
     ${APP_DIR}/Src/serial.c
     ${APP_DIR}/Src/plotter.c
     ${APP_DIR}/Src/line_parser.c
+    ${APP_DIR}/Src/profile.c
     ${APP_DIR}/Src/plot_export.c
     ${APP_DIR}/Src/test_data.c
     ${APP_DIR}/Src/test_bench.c

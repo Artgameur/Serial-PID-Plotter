@@ -82,6 +82,18 @@ typedef struct
   char description[SERIAL_PORT_DESC_LEN];
 } SerialPortInfo_t;
 
+// Receive queue of an open port (reader thread to LVGL thread), since it was opened
+typedef struct
+{
+  uint64_t chunks;                        // queued
+  uint64_t bytes;
+  uint64_t droppedChunks;                 // the queue was full: lost
+  uint64_t droppedBytes;
+  uint32_t queued;                        // chunks waiting now
+  uint32_t highWater;                     // most chunks waiting at once
+  uint32_t capacity;                      // chunks the queue holds
+} SerialStats_t;
+
 // Owned by the caller; must stay alive while open (declare it static or global)
 struct SerialPort
 {
@@ -110,6 +122,9 @@ bool serialIsOpen(const SerialPort_t * port);
 
 int32_t serialSend(SerialPort_t * port, const uint8_t * data, uint32_t len);
 bool    serialSendString(SerialPort_t * port, const char * str);
+
+// Receive queue counters of an open port; false (all 0) when it is not open
+bool serialStatsGet(const SerialPort_t * port, SerialStats_t * stats);
 
 bool serialFormatIsValid(const SerialConfig_t * config);
 void serialFormatToString(const SerialConfig_t * config, char * buffer, uint32_t size);

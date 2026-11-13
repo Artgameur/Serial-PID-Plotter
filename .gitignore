@@ -1,5 +1,6 @@
 # Build output
 cmake-build/
+cmake-build-*/
 build/
 agent/build/
 agent/dist/

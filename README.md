@@ -55,6 +55,17 @@ cmake-build\serial_dashboard_tests.exe
 
 (or `ctest --test-dir cmake-build`). Exit code 0 when all pass.
 
+## Release and profiling builds
+
+Presets: `windows-gcc` (Debug, `cmake-build`), `windows-gcc-release` (`cmake-build-release`) and
+`windows-gcc-profile` (Release with profiling, `cmake-build-profile`). Use Release for daily use
+and for performance comparisons.
+
+The profiling build (CMake option `SD_PROFILE`, off otherwise) writes, once per second, the time
+spent per stage (serial acquisition, queue, parsing, recording, chart preparation, LVGL layout and
+rendering...), CPU, memory and per-port counters to a CSV file. It can also simulate serial ports.
+The environment variables are listed in `Inc/profile.h`.
+
 ## Source layout
 
 - `main.c`: window and LVGL setup, main loop.

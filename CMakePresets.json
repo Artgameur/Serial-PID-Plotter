@@ -19,12 +19,49 @@
       "environment": {
         "PATH": "C:/w64devkit/bin;$penv{PATH}"
       }
+    },
+    {
+      "name": "windows-gcc-release",
+      "displayName": "Windows GCC Release",
+      "inherits": "windows-gcc",
+      "binaryDir": "${sourceDir}/cmake-build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER_FORCED": "TRUE",
+        "CMAKE_C_COMPILER_ID": "GNU",
+        "CMAKE_CXX_COMPILER_FORCED": "TRUE",
+        "CMAKE_CXX_COMPILER_ID": "GNU",
+        "CMAKE_ASM_COMPILER_WORKS": "1"
+      }
+    },
+    {
+      "name": "windows-gcc-profile",
+      "displayName": "Windows GCC Release + profiling",
+      "inherits": "windows-gcc",
+      "binaryDir": "${sourceDir}/cmake-build-profile",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SD_PROFILE": "ON",
+        "CMAKE_C_COMPILER_FORCED": "TRUE",
+        "CMAKE_C_COMPILER_ID": "GNU",
+        "CMAKE_CXX_COMPILER_FORCED": "TRUE",
+        "CMAKE_CXX_COMPILER_ID": "GNU",
+        "CMAKE_ASM_COMPILER_WORKS": "1"
+      }
     }
   ],
   "buildPresets": [
     {
       "name": "windows-gcc",
       "configurePreset": "windows-gcc"
+    },
+    {
+      "name": "windows-gcc-release",
+      "configurePreset": "windows-gcc-release"
+    },
+    {
+      "name": "windows-gcc-profile",
+      "configurePreset": "windows-gcc-profile"
     }
   ]
 }

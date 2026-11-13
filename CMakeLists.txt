@@ -28,6 +28,12 @@ endif()
 
 target_link_libraries(serial_dashboard PRIVATE ${APP_LIBRARIES})
 
+# Profiling build (Inc/profile.h): -DSD_PROFILE=ON, in its own build folder. Off: no profiling code.
+option(SD_PROFILE "Time spent per stage, written to a CSV file once per second" OFF)
+if(SD_PROFILE)
+    target_compile_definitions(serial_dashboard PRIVATE SD_PROFILE)
+endif()
+
 # Tests of the engine without the UI (console program): run serial_dashboard_tests.exe or ctest.
 # SERIAL_DASHBOARD_CLI: the command line tool's direct CSV write (plotExportCliWrite).
 enable_testing()

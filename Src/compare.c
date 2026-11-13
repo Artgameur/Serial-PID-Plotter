@@ -64,6 +64,7 @@
 #include "lang.h"
 #include "plot_export.h"
 #include "plotter.h"
+#include "profile.h"
 #include "settings.h"
 #include "test_bench.h"
 #include "test_data.h"
@@ -649,6 +650,8 @@ void compareSampleAdd(const float * row, uint32_t tick)
     recordFinish(END_FULL);
     return;
   }
+
+  PROF_DO(profSamplesRecorded(1));
 
   chartDirty = true;
 
@@ -2622,6 +2625,7 @@ static void pictureEnd(void)
 static void chartRender(void)
 {
   chartDirty = false;
+  PROF_PUSH(PROF_COMPARE_PREP);
 
   for (uint32_t g = 0; g < graphCount; ++g)
   {
@@ -2630,6 +2634,7 @@ static void chartRender(void)
 
   yAxesWidthUpdate();
   constantNoteUpdate();
+  PROF_POP();
 }
 
 // As wide as the longest value of the graphs, the same for all so their time axes line up. A width

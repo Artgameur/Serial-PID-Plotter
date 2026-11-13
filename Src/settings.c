@@ -16,6 +16,8 @@
 #include <io.h>
 #include <windows.h>
 
+#include "profile.h"
+
 // ================================================================================================
 // ================================================================================================
 //            PRIVATE DEFINE DECLARATION
@@ -75,6 +77,7 @@ static const char * const appKeys[] = {"language", "uiScale", "maxFps", "theme",
 static void              pathInit(void);
 static void              fileLoad(const char * path);
 static bool              fileSave(const char * path, bool appSettings);
+static bool              fileWrite(const char * path, bool appSettings);
 static SettingsEntry_t * entryFind(const char * key);
 static bool              keyIsApp(const char * key);
 static bool              profilePath(const char * name, char * path, size_t size);
@@ -588,6 +591,14 @@ static void fileLoad(const char * path)
 // appSettings = false: without the app settings (profile). Written to "<path>.tmp", which then
 // replaces the file: a crash or power cut while writing leaves the previous file whole.
 static bool fileSave(const char * path, bool appSettings)
+{
+  PROF_PUSH(PROF_SETTINGS_SAVE);
+  bool ok = fileWrite(path, appSettings);
+  PROF_POP();
+  return ok;
+}
+
+static bool fileWrite(const char * path, bool appSettings)
 {
   char   temp[SETTINGS_PATH_LEN + 8];
   FILE * file;

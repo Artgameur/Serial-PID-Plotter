@@ -35,6 +35,7 @@
 #include "lang.h"
 #include "line_parser.h"
 #include "plot_export.h"
+#include "profile.h"
 #include "settings.h"
 #include "test_bench.h"
 #include "ui_widgets.h"
@@ -610,6 +611,8 @@ void plotterFeed(uint32_t conn, const uint8_t * data, uint32_t len, uint32_t tic
 
   uint32_t now = lv_tick_get();
 
+  PROF_PUSH(PROF_PARSE);
+
   for (uint32_t i = 0; i < len; ++i)
   {
     char * text = lineParserByte(&parsers[conn], (char) data[i], now);
@@ -620,6 +623,8 @@ void plotterFeed(uint32_t conn, const uint8_t * data, uint32_t len, uint32_t tic
       lineParse(conn, text, tick);
     }
   }
+
+  PROF_POP();
 }
 
 // Connection opened / closed: its partial line is dropped, and its values are no longer held in
@@ -1586,6 +1591,8 @@ static void lineParse(uint32_t conn, char * text, uint32_t tick)
     return;
   }
 
+  PROF_DO(profLine(conn, values, count));
+
 #ifdef SERIAL_DASHBOARD_CLI
   cliLatestUpdate(conn, values, valid, count);
 #endif
@@ -1593,12 +1600,17 @@ static void lineParse(uint32_t conn, char * text, uint32_t tick)
   // Pausing the plots does not lose any of the test
   if (compareRecording())
   {
+    PROF_PUSH(PROF_RECORD);
     recordFeed(conn, values, valid, count, tick);
+    PROF_POP();
   }
 
   if (!paused)
   {
+    PROF_PUSH(PROF_PLOT_STORE);
     sampleAdd(conn, values, valid, count, tick);
+    PROF_DO(profSamplesPlotted(1));
+    PROF_POP();
   }
 }
 
@@ -1838,6 +1850,7 @@ static uint32_t shownPosition(void)
 static void plotsRender(void)
 {
   renderPending = false;
+  PROF_PUSH(PROF_PLOT_PREP);
 
   for (uint32_t p = 0; p < plotCount; ++p)
   {
@@ -1867,6 +1880,7 @@ static void plotsRender(void)
     uint32_t maxBuckets = decimate ? (((count + size - 1) / size) + 1) : count;
 
     lv_chart_set_point_count(plot->chart, decimate ? (maxBuckets * 2) : maxBuckets);
+    PROF_DO(uint32_t shownSeries = 0;)
 
     for (uint32_t v = 0; v < PLOTTER_MAX_VARS; ++v)
     {
@@ -1875,6 +1889,8 @@ static void plotsRender(void)
       {
         continue;
       }
+
+      PROF_DO(shownSeries++;)
 
       int32_t *     y     = lv_chart_get_series_y_array(plot->chart, plot->series[v]);
       const float * raw   = history[v];
@@ -2001,11 +2017,13 @@ static void plotsRender(void)
 
     yAxisWidthUpdate(plot);
     lv_chart_refresh(plot->chart);
+    PROF_DO(profChartPoints(count * shownSeries, pointCount * shownSeries));
   }
 
   legendUpdate();
   readoutUpdate();
   plotsInvalidate();
+  PROF_POP();
 }
 
 // New plot length: shows all of it, cursors outside it are removed

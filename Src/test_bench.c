@@ -33,6 +33,7 @@
 #include "lang.h"
 #include "plot_export.h"
 #include "plotter.h"
+#include "profile.h"
 #include "settings.h"
 #include "ui_widgets.h"
 
@@ -362,10 +363,12 @@ static void pathGet(const char * base, const char * extension, char * path, uint
 
 static bool pictureSave(lv_obj_t * obj, const char * path)
 {
+  PROF_PUSH(PROF_PICTURE);
   lv_draw_buf_t * snapshot = lv_snapshot_take(obj, LV_COLOR_FORMAT_ARGB8888);
 
   if (snapshot == NULL)
   {
+    PROF_POP();
     return false;
   }
 
@@ -441,6 +444,7 @@ static bool pictureSave(lv_obj_t * obj, const char * path)
   lv_free(png);
   free(rgb);
   lv_draw_buf_destroy(snapshot);
+  PROF_POP();
   return ok;
 }
 
