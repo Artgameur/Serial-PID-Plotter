@@ -8,6 +8,7 @@
 // ------------------------------------------------------------------------------------------------
 #include "ui_widgets.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -311,6 +312,17 @@ lv_obj_t * uiBoxCreate(lv_obj_t * parent, const char * title, lv_obj_t ** header
   lv_label_set_text(label, title);
 
   return box;
+}
+
+int32_t uiChartPoint(float value, float yMin, float yMax)
+{
+  if (isnan(value))
+  {
+    return LV_CHART_POINT_NONE;
+  }
+
+  double scaled = (((double) value - yMin) * UI_CHART_RES) / ((double) yMax - yMin);
+  return (int32_t) lround(LV_CLAMP(-(double) UI_CHART_CLAMP, scaled, (double) UI_CHART_CLAMP));
 }
 
 // Bars come as 3 points: top, bottom on the same X, and an end of line. A real line only gets

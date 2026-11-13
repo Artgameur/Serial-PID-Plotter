@@ -18,7 +18,8 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-get_filename_component(APP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+# The app's source list (sets APP_DIR, APP_SOURCES, ...)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../sources.cmake)
 
 # The lv_conf.h of the app, not of this folder
 set(LV_BUILD_CONF_DIR ${APP_DIR} CACHE PATH "" FORCE)
@@ -29,35 +30,13 @@ add_subdirectory(${APP_DIR}/lvgl ${CMAKE_BINARY_DIR}/lvgl)
 add_executable(serial_dashboard_cli
     serial_dashboard_cli.c
     cli_session.c
-    ${APP_DIR}/Src/lv_port_disp.c
-    ${APP_DIR}/Src/lv_port_indev.c
-    ${APP_DIR}/Src/screens.c
-    ${APP_DIR}/Src/Serial_Reception.c
-    ${APP_DIR}/Src/plotter.c
-    ${APP_DIR}/Src/plot_export.c
-    ${APP_DIR}/Src/test_data.c
-    ${APP_DIR}/Src/test_bench.c
-    ${APP_DIR}/Src/compare.c
-    ${APP_DIR}/Src/settings.c
-    ${APP_DIR}/Src/app_window.c
-    ${APP_DIR}/Src/cmd_panel.c
-    ${APP_DIR}/Src/lang.c
-    ${APP_DIR}/Src/ui_widgets.c
-    ${APP_DIR}/Assets/frame_0001.c
-    ${APP_DIR}/Assets/frame_0002.c
-    ${APP_DIR}/Assets/frame_0003.c
-    ${APP_DIR}/Assets/frame_0004.c
-    ${APP_DIR}/Assets/robot_arm_img.c
+    ${APP_SOURCES}
 )
 
 target_compile_definitions(serial_dashboard_cli PRIVATE SERIAL_DASHBOARD_CLI)
-
-target_include_directories(serial_dashboard_cli PRIVATE
-    ${APP_DIR}
-    ${APP_DIR}/Inc
-)
-
-target_link_libraries(serial_dashboard_cli PRIVATE lvgl gdi32 user32 setupapi comdlg32 ole32 dwmapi shell32)
+target_include_directories(serial_dashboard_cli PRIVATE ${APP_INCLUDE_DIRS})
+target_compile_options(serial_dashboard_cli PRIVATE ${APP_WARNINGS})
+target_link_libraries(serial_dashboard_cli PRIVATE ${APP_LIBRARIES})
 
 # One file to hand over: no DLL of the compiler needed
 target_link_options(serial_dashboard_cli PRIVATE -static)

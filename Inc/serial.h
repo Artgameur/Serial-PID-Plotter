@@ -7,8 +7,8 @@
 */
 // ------------------------------------------------------------------------------------------------
 
-#ifndef SERIAL_RECEPTION_H
-#define SERIAL_RECEPTION_H
+#ifndef SERIAL_H
+#define SERIAL_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -86,7 +86,7 @@ typedef struct
 struct SerialPort
 {
   void *               handle;
-  void *               rx;                // reader thread and received chunks (Serial_Reception.c)
+  void *               rx;                // reader thread and received chunks (serial.c)
   char                 name[SERIAL_PORT_NAME_LEN];
   SerialConfig_t       config;
   lv_timer_t *         pollTimer;
@@ -114,4 +114,4 @@ bool    serialSendString(SerialPort_t * port, const char * str);
 bool serialFormatIsValid(const SerialConfig_t * config);
 void serialFormatToString(const SerialConfig_t * config, char * buffer, uint32_t size);
 
-#endif //SERIAL_RECEPTION_H
+#endif //SERIAL_H

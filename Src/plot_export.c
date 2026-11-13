@@ -19,9 +19,9 @@
 #include <string.h>
 #include <windows.h>
 #include <commdlg.h>
-#include <objbase.h>
 
 #include "lvgl.h"
+#include "app_window.h"
 #include "lang.h"
 
 // ================================================================================================
@@ -63,7 +63,6 @@ typedef struct
 
 static unsigned __stdcall exportThread(void * arg);
 static unsigned __stdcall saveThread(void * arg);
-static bool               pathAsk(void);
 static bool               fileWrite(const PlotExport_t * data, const wchar_t * path);
 static void               quotedWrite(const char * text, FILE * file);
 
@@ -249,11 +248,15 @@ static unsigned __stdcall exportThread(void * arg)
 {
   LV_UNUSED(arg);
 
-  // The Explorer style dialog uses COM
-  HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-  char    path[EXPORT_PATH_LEN * 3];       // UTF-8 (LVGL text)
+  char path[EXPORT_PATH_LEN * 3];          // UTF-8 (LVGL text)
+  // exportPath: default file name in, chosen path out. "\0" separated pairs: not a single text
+  // for tr().
+  bool chosen = appWindowFileDialog(exportOwner, true, tr("Export plot data"),
+                                    (langGet() == LANG_FR) ? L"Fichier CSV (*.csv)\0*.csv\0Tous les fichiers (*.*)\0*.*\0"
+                                                           : L"CSV file (*.csv)\0*.csv\0All files (*.*)\0*.*\0",
+                                    L"csv", exportPath, EXPORT_PATH_LEN, OFN_OVERWRITEPROMPT);
 
-  if (!pathAsk())
+  if (!chosen)
   {
     // Canceled: no message
     exportMessage[0] = '\0';
@@ -273,38 +276,10 @@ static unsigned __stdcall exportThread(void * arg)
     }
   }
 
-  if (SUCCEEDED(com))
-  {
-    CoUninitialize();
-  }
-
   plotExportFree(exportData);
   exportData = NULL;
   InterlockedExchange(&exportState, PLOT_EXPORT_DONE);
   return 0;
-}
-
-// exportPath: default file name in, chosen path out (Unicode dialog: accents in the title and in
-// the folder / file names)
-static bool pathAsk(void)
-{
-  OPENFILENAMEW dialog = {0};
-  wchar_t       title[64];
-
-  MultiByteToWideChar(CP_UTF8, 0, tr("Export plot data"), -1, title, sizeof(title) / sizeof(title[0]));
-
-  dialog.lStructSize = sizeof(dialog);
-  dialog.hwndOwner   = exportOwner;
-  // "\0" separated pairs: not a single text for tr()
-  dialog.lpstrFilter = (langGet() == LANG_FR) ? L"Fichier CSV (*.csv)\0*.csv\0Tous les fichiers (*.*)\0*.*\0"
-                                              : L"CSV file (*.csv)\0*.csv\0All files (*.*)\0*.*\0";
-  dialog.lpstrFile   = exportPath;
-  dialog.nMaxFile    = EXPORT_PATH_LEN;
-  dialog.lpstrDefExt = L"csv";
-  dialog.lpstrTitle  = title;
-  dialog.Flags       = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
-
-  return GetSaveFileNameW(&dialog) != FALSE;
 }
 
 static bool fileWrite(const PlotExport_t * data, const wchar_t * path)

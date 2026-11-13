@@ -15,7 +15,6 @@
 #include <string.h>
 #include <windows.h>
 #include <commdlg.h>
-#include <objbase.h>
 
 #include "lvgl.h"
 #include "app_window.h"
@@ -23,7 +22,7 @@
 #include "lang.h"
 #include "compare.h"
 #include "plotter.h"
-#include "Serial_Reception.h"
+#include "serial.h"
 #include "settings.h"
 #include "ui_widgets.h"
 
@@ -1877,32 +1876,15 @@ static void fileDialogStart(bool save)
 
 static unsigned __stdcall fileDialogThread(void * arg)
 {
-  HRESULT       com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-  OPENFILENAMEW dialog = {0};
-  wchar_t       title[64];
-
   LV_UNUSED(arg);
-  MultiByteToWideChar(CP_UTF8, 0, tr(fileDialogSave ? "Export the settings" : "Import settings"), -1, title,
-                      sizeof(title) / sizeof(title[0]));
 
-  dialog.lStructSize = sizeof(dialog);
-  dialog.hwndOwner   = fileDialogOwner;
   // "\0" separated pairs: not a single text for tr()
-  dialog.lpstrFilter = (langGet() == LANG_FR) ? L"Paramètres (*.ini)\0*.ini\0Tous les fichiers (*.*)\0*.*\0"
-                                              : L"Settings (*.ini)\0*.ini\0All files (*.*)\0*.*\0";
-  dialog.lpstrFile   = fileDialogPath;
-  dialog.nMaxFile    = MAX_PATH;
-  dialog.lpstrTitle  = title;
-  dialog.lpstrDefExt = L"ini";
-  dialog.Flags       = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER |
-                       (fileDialogSave ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
-
-  fileDialogChosen = fileDialogSave ? GetSaveFileNameW(&dialog) : GetOpenFileNameW(&dialog);
-
-  if (SUCCEEDED(com))
-  {
-    CoUninitialize();
-  }
+  fileDialogChosen = appWindowFileDialog(fileDialogOwner, fileDialogSave,
+                                         tr(fileDialogSave ? "Export the settings" : "Import settings"),
+                                         (langGet() == LANG_FR) ? L"Paramètres (*.ini)\0*.ini\0Tous les fichiers (*.*)\0*.*\0"
+                                                                : L"Settings (*.ini)\0*.ini\0All files (*.*)\0*.*\0",
+                                         L"ini", fileDialogPath, MAX_PATH,
+                                         fileDialogSave ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
 
   InterlockedExchange(&fileDialogDone, 1);
   return 0;

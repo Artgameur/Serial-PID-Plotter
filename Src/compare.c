@@ -59,8 +59,8 @@
 #include <wchar.h>
 #include <windows.h>
 #include <commdlg.h>
-#include <objbase.h>
 
+#include "app_window.h"
 #include "lang.h"
 #include "plot_export.h"
 #include "plotter.h"
@@ -111,8 +111,6 @@
 #define COMPARE_SHADE_COUNT   COMPARE_VARS_MAX
 #define COMPARE_CONST_MARGIN  0.001f      // the constant "differs" by more than this and the band
 
-#define CHART_RES             100000      // chart points of the Y range (see plotter.c)
-#define CHART_CLAMP           (CHART_RES * 100)
 
 // Sizes that follow the size of a picture (pictureScale)
 #define PICTURE_PX(px)        ((uiPx(px) * pictureScale) / 100)
@@ -413,7 +411,6 @@ static void    graphRender(Graph_t * graph, uint32_t g);
 static void    curvesBuild(Graph_t * graph, uint32_t g);
 static void    constantNoteUpdate(void);
 static void    viewFit(Graph_t * graph);
-static int32_t chartPoint(const Graph_t * graph, float value);
 static int32_t timeToX(const Graph_t * graph, const lv_area_t * area, double time);
 static double  xToTime(const Graph_t * graph, const lv_area_t * area, int32_t x);
 static int32_t valueToY(const Graph_t * graph, const lv_area_t * area, float value);
@@ -1211,7 +1208,7 @@ static void graphCreate(lv_obj_t * parent, uint32_t g)
   lv_chart_set_update_mode(chart, LV_CHART_UPDATE_MODE_CIRCULAR);
   lv_chart_set_point_count(chart, 2 * COMPARE_COLUMNS_MIN);
   lv_chart_set_div_line_count(chart, 0, 0);
-  lv_chart_set_axis_range(chart, LV_CHART_AXIS_PRIMARY_Y, 0, CHART_RES);
+  lv_chart_set_axis_range(chart, LV_CHART_AXIS_PRIMARY_Y, 0, UI_CHART_RES);
 
   lv_obj_add_event_cb(chart, gridDrawEvent, LV_EVENT_DRAW_MAIN | LV_EVENT_PREPROCESS, userData);
   lv_obj_add_event_cb(chart, chartPostEvent, LV_EVENT_DRAW_POST, userData);
@@ -2559,17 +2556,6 @@ static void viewFit(Graph_t * graph)
   graph->viewEnd   = LV_MAX(longest, 1.0);
 }
 
-static int32_t chartPoint(const Graph_t * graph, float value)
-{
-  if (isnan(value))
-  {
-    return LV_CHART_POINT_NONE;
-  }
-
-  double scaled = (((double) value - graph->yMin) * CHART_RES) / ((double) graph->yMax - graph->yMin);
-  return (int32_t) lround(LV_CLAMP(-(double) CHART_CLAMP, scaled, (double) CHART_CLAMP));
-}
-
 // Sizes of the graphs at pictureScale
 static void pictureStylesSet(const lv_font_t * font)
 {
@@ -2761,7 +2747,7 @@ static void graphRender(Graph_t * graph, uint32_t g)
       float value;
 
       memcpy(&value, &y[i], sizeof(value));
-      y[i] = chartPoint(graph, value);
+      y[i] = uiChartPoint(value, graph->yMin, graph->yMax);
     }
 
     lv_chart_set_series_color(chart, graph->series[c], curve->color);
@@ -3545,24 +3531,13 @@ static unsigned __stdcall openThread(void * arg)
 {
   LV_UNUSED(arg);
 
-  HRESULT       com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-  OPENFILENAMEW dialog = {0};
-  wchar_t       title[64];
-
-  MultiByteToWideChar(CP_UTF8, 0, tr("Open tests"), -1, title, sizeof(title) / sizeof(title[0]));
-
   openPaths[0] = L'\0';
-  dialog.lStructSize = sizeof(dialog);
-  dialog.hwndOwner   = openOwner;
-  // "\0" separated pairs: not a single text for tr()
-  dialog.lpstrFilter = (langGet() == LANG_FR) ? L"Fichier CSV (*.csv)\0*.csv\0Tous les fichiers (*.*)\0*.*\0"
-                                              : L"CSV file (*.csv)\0*.csv\0All files (*.*)\0*.*\0";
-  dialog.lpstrFile   = openPaths;
-  dialog.nMaxFile    = OPEN_PATHS_LEN;
-  dialog.lpstrTitle  = title;
-  dialog.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER | OFN_ALLOWMULTISELECT;
 
-  if (GetOpenFileNameW(&dialog))
+  // "\0" separated pairs: not a single text for tr()
+  if (appWindowFileDialog(openOwner, false, tr("Open tests"),
+                          (langGet() == LANG_FR) ? L"Fichier CSV (*.csv)\0*.csv\0Tous les fichiers (*.*)\0*.*\0"
+                                                 : L"CSV file (*.csv)\0*.csv\0All files (*.*)\0*.*\0",
+                          NULL, openPaths, OPEN_PATHS_LEN, OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT))
   {
     const wchar_t * folder = openPaths;
     const wchar_t * name   = folder + wcslen(folder) + 1;
@@ -3592,11 +3567,6 @@ static unsigned __stdcall openThread(void * arg)
 
       name += nameLen + 1;
     }
-  }
-
-  if (SUCCEEDED(com))
-  {
-    CoUninitialize();
   }
 
   InterlockedExchange(&openState, PLOT_EXPORT_DONE);

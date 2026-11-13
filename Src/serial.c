@@ -12,7 +12,7 @@
    @version 1.0
 */
 // ------------------------------------------------------------------------------------------------
-#include "Serial_Reception.h"
+#include "serial.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,9 +45,13 @@ typedef struct
   uint8_t  data[SERIAL_RX_BUFFER_SIZE];
 } RxChunk_t;
 
-// Shared by the reader thread (writes chunks, sets lost) and the LVGL timer (reads chunks)
+// Shared by the reader thread (writes chunks, sets lost) and the LVGL timer (reads chunks). Owned
+// by both the open port and the reader thread: the last of them to let go (rxRelease) closes the
+// port handle and frees it, so a reader thread stuck in a driver never uses freed memory or a
+// closed handle.
 typedef struct
 {
+  HANDLE           port;
   HANDLE           thread;
   HANDLE           stopEvent;
   CRITICAL_SECTION lock;
@@ -55,6 +59,7 @@ typedef struct
   uint32_t         head;                  // next written
   uint32_t         tail;                  // next read
   volatile LONG    lost;                  // the port failed (ex: USB unplugged)
+  volatile LONG    owners;                // the open port, and the reader thread while it runs
 } SerialRx_t;
 
 // ================================================================================================
@@ -77,6 +82,7 @@ static void              serialPollCb(lv_timer_t * tim);
 static void              serialHandleDisconnect(SerialPort_t * port);
 static unsigned __stdcall readerThread(void * arg);
 static void              chunkPush(SerialRx_t * rx, const uint8_t * data, uint32_t len, uint32_t tick);
+static void              rxRelease(SerialRx_t * rx);
 
 // ================================================================================================
 // ================================================================================================
@@ -205,6 +211,8 @@ bool serialOpen(SerialPort_t * port, const char * portName, const SerialConfig_t
   }
 
   InitializeCriticalSection(&rx->lock);
+  rx->port      = h;
+  rx->owners    = 1;
   rx->stopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
 
   // Re-opening an already used struct closes the previous port first
@@ -218,9 +226,12 @@ bool serialOpen(SerialPort_t * port, const char * portName, const SerialConfig_t
   port->userData     = userData;
   snprintf(port->name, SERIAL_PORT_NAME_LEN, "%s", portName);
 
-  rx->thread = (rx->stopEvent != NULL) ? (HANDLE) _beginthreadex(NULL, 0, readerThread, port, 0, NULL) : NULL;
+  // The thread gets rx itself, not port: the port struct may be reused before the thread ends
+  rx->owners = 2;
+  rx->thread = (rx->stopEvent != NULL) ? (HANDLE) _beginthreadex(NULL, 0, readerThread, rx, 0, NULL) : NULL;
   if (rx->thread == NULL)
   {
+    rx->owners = 1;
     serialClose(port);
     return false;
   }
@@ -242,30 +253,22 @@ void serialClose(SerialPort_t * port)
     port->pollTimer = NULL;
   }
 
-  // The reader thread ends first (it uses the handle and the chunks)
+  // The port handle is closed with rx (it is rx->port), once the reader thread no longer uses it
   SerialRx_t * rx = (SerialRx_t *) port->rx;
   if (rx != NULL)
   {
     if (rx->thread != NULL)
     {
       SetEvent(rx->stopEvent);
+      // Wakes the reader thread if a driver holds it in a read or a wait
+      CancelIoEx(rx->port, NULL);
+      // Not ended in time (driver stuck): the thread frees rx and closes the port when it ends
       WaitForSingleObject(rx->thread, STOP_TIMEOUT_MS);
       CloseHandle(rx->thread);
     }
 
-    if (rx->stopEvent != NULL)
-    {
-      CloseHandle(rx->stopEvent);
-    }
-
-    DeleteCriticalSection(&rx->lock);
-    free(rx);
     port->rx = NULL;
-  }
-
-  if ((port->handle != NULL) && (port->handle != INVALID_HANDLE_VALUE))
-  {
-    CloseHandle((HANDLE) port->handle);
+    rxRelease(rx);
   }
 
   port->handle = NULL;
@@ -406,9 +409,8 @@ static void serialPollCb(lv_timer_t * tim)
 // Waits for received bytes (or the stop event), reads them and stamps them at once
 static unsigned __stdcall readerThread(void * arg)
 {
-  SerialPort_t * port = (SerialPort_t *) arg;
-  SerialRx_t *   rx   = (SerialRx_t *) port->rx;
-  HANDLE         h    = (HANDLE) port->handle;
+  SerialRx_t *   rx   = (SerialRx_t *) arg;
+  HANDLE         h    = rx->port;
   OVERLAPPED     waitOv = {0};
   OVERLAPPED     readOv = {0};
   uint8_t        buffer[SERIAL_RX_BUFFER_SIZE];
@@ -485,7 +487,28 @@ static unsigned __stdcall readerThread(void * arg)
     CloseHandle(readOv.hEvent);
   }
 
+  // Last use of rx by this thread
+  rxRelease(rx);
   return 0;
+}
+
+// The last owner (the open port or the reader thread) closes the port and frees rx
+static void rxRelease(SerialRx_t * rx)
+{
+  if (InterlockedDecrement(&rx->owners) != 0)
+  {
+    return;
+  }
+
+  CloseHandle(rx->port);
+
+  if (rx->stopEvent != NULL)
+  {
+    CloseHandle(rx->stopEvent);
+  }
+
+  DeleteCriticalSection(&rx->lock);
+  free(rx);
 }
 
 // Full (the LVGL thread stalled for seconds): the chunk is dropped

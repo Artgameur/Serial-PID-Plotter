@@ -46,7 +46,6 @@
 #define CLI_DISPLAY_HEIGHT    720
 #define CLI_BUFFER_LINES      40
 #define CLI_BYTES_PER_PIXEL   4
-#define CLI_UNIT_START        " ["        // "Temp [C]": the variable's name is before it
 
 // ================================================================================================
 // ================================================================================================
@@ -128,7 +127,6 @@ static const char *  variableResolve(const char * name);
 static void          graphAdd(char * list);
 static void          graphsResolve(void);
 static uint32_t      tickGet(void);
-static void          flushDiscard(lv_display_t * display, const lv_area_t * area, uint8_t * pixels);
 static void          uiStart(void);
 static void          picturePrint(const char * path);
 static void          pictureMake(const char * path, const char * format, const char * width, const char * ppi);
@@ -526,17 +524,13 @@ static const char * variableResolve(const char * name)
     }
   }
 
-  size_t length = strlen(name);
-
   for (uint32_t t = 0; t < testCount; ++t)
   {
     for (uint32_t c = 0; c < tests[t].data->columnCount; ++c)
     {
       const char * header = tests[t].data->headers[c];
-      const char * unit   = strstr(header, CLI_UNIT_START);
-      size_t       size   = (unit != NULL) ? (size_t) (unit - header) : strlen(header);
 
-      if ((size != length) || (_strnicmp(header, name, length) != 0))
+      if (!cliNameIs(header, name))
       {
         continue;
       }
@@ -643,13 +637,6 @@ static uint32_t tickGet(void)
   return GetTickCount();
 }
 
-static void flushDiscard(lv_display_t * display, const lv_area_t * area, uint8_t * pixels)
-{
-  LV_UNUSED(area);
-  LV_UNUSED(pixels);
-  lv_display_flush_ready(display);
-}
-
 // A display without a window, with the light theme, holding the Compare tab
 static void uiStart(void)
 {
@@ -660,7 +647,7 @@ static void uiStart(void)
 
   lv_display_t * display = lv_display_create(CLI_DISPLAY_WIDTH, CLI_DISPLAY_HEIGHT);
 
-  lv_display_set_flush_cb(display, flushDiscard);
+  lv_display_set_flush_cb(display, cliFlushDiscard);
   lv_display_set_buffers(display, buffer, NULL, sizeof(buffer), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
   lv_lock();

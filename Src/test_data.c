@@ -488,7 +488,11 @@ void testSettingsSent(const char * settings, const char * commands, char * outpu
     {
       if (nameSame(field, nameLen, command, strcspn(command, NAME_END)) && (nameLen > 0))
       {
-        used += (size_t) snprintf(&output[used], size - used, "%s%.*s", (used > 0) ? ", " : "", (int) fieldLen, field);
+        int written = snprintf(&output[used], size - used, "%s%.*s", (used > 0) ? ", " : "", (int) fieldLen, field);
+
+        // Cut at the end of output (", " between the fields can make it longer than settings)
+        used = (written > 0) ? (used + (size_t) written) : used;
+        used = (used < size) ? used : (size - 1);
         break;
       }
     }

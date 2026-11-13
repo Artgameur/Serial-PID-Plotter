@@ -30,7 +30,7 @@
 #include "plot_export.h"
 #include "plotter.h"
 #include "screens.h"
-#include "Serial_Reception.h"
+#include "serial.h"
 #include "settings.h"
 #include "test_bench.h"
 #include "test_data.h"
@@ -73,7 +73,7 @@
 #define PROFILES_DIR          "\\profiles\\"
 #define LOG_DIR               L"SerialDashboardCli"
 #define LOG_FILE              L"\\session.log"
-#define UNIT_START            " ["
+#define UNIT_START            " ["        // "Temp [C]": the variable's name is before it
 
 // ================================================================================================
 // ================================================================================================
@@ -161,7 +161,6 @@ static char             settingsUsed[MAX_PATH * 2];
 
 static uint32_t     nowMs(void);
 static uint32_t     tickGet(void);
-static void         flushDiscard(lv_display_t * display, const lv_area_t * area, uint8_t * pixels);
 static const char * optionGet(int argc, char ** argv, const char * name);
 static bool         flagGet(int argc, char ** argv, const char * name);
 static uint32_t     positionals(int argc, char ** argv, char ** out, uint32_t max);
@@ -189,6 +188,22 @@ static void         argQuote(wchar_t * line, size_t size, const char * arg);
 //            PUBLIC FUNCTION SECTION
 // ================================================================================================
 // ================================================================================================
+
+void cliFlushDiscard(lv_display_t * display, const lv_area_t * area, uint8_t * pixels)
+{
+  LV_UNUSED(area);
+  LV_UNUSED(pixels);
+  lv_display_flush_ready(display);
+}
+
+bool cliNameIs(const char * header, const char * name)
+{
+  const char * unit   = strstr(header, UNIT_START);
+  size_t       base   = (unit != NULL) ? (size_t) (unit - header) : strlen(header);
+  size_t       length = strlen(name);
+
+  return (base == length) && (_strnicmp(header, name, length) == 0);
+}
 
 void cliOutf(CliOut_t * out, const char * format, ...)
 {
@@ -367,7 +382,7 @@ int cliServe(int argc, char ** argv)
 
   lv_display_t * display = lv_display_create(DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
-  lv_display_set_flush_cb(display, flushDiscard);
+  lv_display_set_flush_cb(display, cliFlushDiscard);
   lv_display_set_buffers(display, buffer, NULL, sizeof(buffer), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
   // The user's settings, read only: settingsInit() (which saves them) is not called
@@ -682,12 +697,6 @@ static uint32_t tickGet(void)
   return GetTickCount();
 }
 
-static void flushDiscard(lv_display_t * display, const lv_area_t * area, uint8_t * pixels)
-{
-  LV_UNUSED(area);
-  LV_UNUSED(pixels);
-  lv_display_flush_ready(display);
-}
 
 static const char * optionGet(int argc, char ** argv, const char * name)
 {
@@ -993,7 +1002,6 @@ static const char * variableResolve(const char * name, char * error, size_t size
   char        headers[PLOTTER_MAX_VARS][TEST_HEADER_LEN];
   float       values[PLOTTER_MAX_VARS];
   uint32_t    count = plotterCliLatest(headers, values);
-  size_t      length = strlen(name);
 
   found[0] = '\0';
 
@@ -1015,10 +1023,7 @@ static const char * variableResolve(const char * name, char * error, size_t size
 
       for (uint32_t c = 0; c < listCount; ++c)
       {
-        const char * unit = strstr(list[c], UNIT_START);
-        size_t       base = (unit != NULL) ? (size_t) (unit - list[c]) : strlen(list[c]);
-
-        if ((pass == 0) ? (strcmp(list[c], name) == 0) : ((base == length) && (_strnicmp(list[c], name, length) == 0)))
+        if ((pass == 0) ? (strcmp(list[c], name) == 0) : cliNameIs(list[c], name))
         {
           if ((found[0] != '\0') && (strcmp(found, list[c]) != 0))
           {
@@ -1673,6 +1678,8 @@ static unsigned __stdcall pipeThread(void * arg)
 
     DisconnectNamedPipe(pipe);
   }
+
+  return 0;
 }
 
 // Ports closed, then the process ends

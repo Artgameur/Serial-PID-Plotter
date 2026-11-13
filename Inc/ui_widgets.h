@@ -33,6 +33,13 @@
 #define UI_LEGEND_DOT_PAD      13         // room for the dot in front of a legend's text (before uiPx)
 #define UI_LINE_ROUND_WIDTH   3           // chart lines this thick get round joins
 
+// lv_chart stores int32 points: the plots and the Compare graphs map their shown Y range (floats)
+// on 0..UI_CHART_RES, so the precision follows the zoom. lv_chart computes point * height in int32:
+// UI_CHART_RES x the chart height must stay below 2^31. Points out of the range are clamped
+// (lv_chart draws them at the edge anyway).
+#define UI_CHART_RES          100000
+#define UI_CHART_CLAMP        (UI_CHART_RES * 100)
+
 // ================================================================================================
 // ================================================================================================
 //            EXTERNAL FUNCTION DECLARATION
@@ -76,6 +83,10 @@ void uiLegendDotAdd(lv_obj_t * label);
 // draws a vertical bar per column: its line width only thickens it in X, so a flat curve stays
 // 1 pixel high. The bars are made that much taller too. Other lines are real lines, anti-aliased.
 void uiChartLineThicken(lv_draw_line_dsc_t * line);
+
+// Chart point (axis range 0..UI_CHART_RES) of value shown between yMin and yMax;
+// LV_CHART_POINT_NONE for NAN
+int32_t uiChartPoint(float value, float yMin, float yMax);
 
 // Bordered box: header (title, and what the box applies to, added by the caller in *header), then
 // its rows (returned)

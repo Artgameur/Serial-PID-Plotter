@@ -11,6 +11,7 @@
 #define APP_WINDOW_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "lvgl.h"
@@ -86,5 +87,15 @@ void appWindowNotify(const char * title, const char * text);
 // Starts the app again in the same window position and size (ex: to show a loaded settings
 // profile) and ends this instance; returns only if the new instance could not be started
 void appWindowRestart(void);
+
+// Windows "Open" / "Save as" dialog, modal to owner (HWND of the app's window, read in the LVGL
+// thread: lv_windows_get_display_window_handle()). Blocks until it closes:
+// call it from a thread of its own (it sets up COM for it), not from the LVGL thread.
+// title: UTF-8. filter: "\0" separated pairs (L"CSV file (*.csv)\0*.csv\0"). defExt: added to a
+// name without one (NULL: none). path: default name in, chosen path out (pathLen characters; with
+// OFN_ALLOWMULTISELECT, the folder then the names). flags: OFN_xxx added to OFN_PATHMUSTEXIST |
+// OFN_NOCHANGEDIR | OFN_EXPLORER. false: canceled.
+bool appWindowFileDialog(void * owner, bool save, const char * title, const wchar_t * filter,
+                         const wchar_t * defExt, wchar_t * path, uint32_t pathLen, uint32_t flags);
 
 #endif //APP_WINDOW_H

@@ -16,7 +16,9 @@
 #include <string.h>
 #include <windows.h>
 #include <windowsx.h>
+#include <commdlg.h>
 #include <dwmapi.h>
+#include <objbase.h>
 #include <shellapi.h>
 
 #include "lvgl.h"
@@ -440,6 +442,36 @@ void appWindowSetMaxFps(uint32_t fps)
   {
     lv_timer_set_period(timer, 1000 / LV_CLAMP(FPS_MIN, fps, FPS_MAX));
   }
+}
+
+bool appWindowFileDialog(void * owner, bool save, const char * title, const wchar_t * filter,
+                         const wchar_t * defExt, wchar_t * path, uint32_t pathLen, uint32_t flags)
+{
+  // The Explorer style dialog uses COM
+  HRESULT       com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+  OPENFILENAMEW dialog = {0};
+  wchar_t       wideTitle[64];
+
+  // Unicode dialog: accents in the title and in the folder / file names
+  MultiByteToWideChar(CP_UTF8, 0, title, -1, wideTitle, sizeof(wideTitle) / sizeof(wideTitle[0]));
+
+  dialog.lStructSize = sizeof(dialog);
+  dialog.hwndOwner   = (HWND) owner;
+  dialog.lpstrFilter = filter;
+  dialog.lpstrFile   = path;
+  dialog.nMaxFile    = pathLen;
+  dialog.lpstrDefExt = defExt;
+  dialog.lpstrTitle  = wideTitle;
+  dialog.Flags       = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER | flags;
+
+  bool chosen = save ? GetSaveFileNameW(&dialog) : GetOpenFileNameW(&dialog);
+
+  if (SUCCEEDED(com))
+  {
+    CoUninitialize();
+  }
+
+  return chosen;
 }
 
 // ================================================================================================

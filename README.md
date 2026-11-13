@@ -1,16 +1,25 @@
 # Serial Dashboard
 
-This project sets up a minimal standalone C application that:
+Windows desktop app (C, LVGL) for devices that send numbers over a serial / USB VCOM port:
 
-- builds a standalone Windows executable with CMake
-- uses LVGL for the UI layer
-- enumerates COM ports and opens a COM port on Windows
+- **Serial** tab: up to 4 connections at once, terminal (text / hex / decimal), auto reconnect.
+- **Plot** tab: live plots of the received values (up to 8 plot windows, 32 variables), zoom,
+  cursors, bars, command buttons, CSV export.
+- **Compare** tab: records tests started by a command, stopped by a condition, a timeout or a
+  plateau; chains of tests; compares recorded tests and tests opened from CSV files.
+
+Settings are kept in `%APPDATA%\SerialDashboard\settings.ini` (profiles in `profiles\`).
+
+`agent/` builds `serial_dashboard_cli.exe`, a command line version of the same engine for
+scripts and AI agents (see `agent/AGENT.md`).
 
 ## Prerequisites
 
 - CMake 3.20+
-- GCC / MinGW toolchain with Make
+- GCC / MinGW toolchain with Make (`C:\w64devkit`)
 - Windows 10 or newer
+- LVGL in `lvgl/`: a git submodule pinned to LVGL v9.6.0. Clone with
+  `git clone --recurse-submodules`, or run `git submodule update --init` after a plain clone.
 
 ## Build
 
@@ -32,8 +41,22 @@ The executable is created under:
 cmake-build\serial_dashboard.exe
 ```
 
-## Notes
+The command line tool: `agent\build_cli.bat` (output in `agent\dist`).
 
-- The code opens a serial port using the Windows API and polls for incoming data.
-- The LVGL UI updates a label with the detected COM ports and any bytes received.
-- If you want to target a different COM port, edit the value in `main.c`.
+## Tests
+
+`serial_dashboard_tests` (built with the app) tests the engine without the UI: conditions, CSV
+export / import, plateau detection, serial line parser, settings file.
+
+```bat
+cmake --build cmake-build --target serial_dashboard_tests
+cmake-build\serial_dashboard_tests.exe
+```
+
+(or `ctest --test-dir cmake-build`). Exit code 0 when all pass.
+
+## Source layout
+
+- `main.c`: window and LVGL setup, main loop.
+- `sources.cmake`: the engine's source list, shared by the app and by `agent/`.
+- `Src/`, `Inc/`: the engine (one `.c` / `.h` pair per module).

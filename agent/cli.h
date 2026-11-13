@@ -15,6 +15,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "lvgl.h"
+
 // ================================================================================================
 // ================================================================================================
 //            DEFINE DECLARATION
@@ -45,6 +47,12 @@ typedef struct
 //            EXTERNAL FUNCTION DECLARATION
 // ================================================================================================
 // ================================================================================================
+
+// Display flush of the tools: nothing is shown (pictures draw themselves)
+void cliFlushDiscard(lv_display_t * display, const lv_area_t * area, uint8_t * pixels);
+
+// header ("Temp [C]") names name without its unit, upper / lower case aside ("temp")
+bool cliNameIs(const char * header, const char * name);
 
 void cliOutf(CliOut_t * out, const char * format, ...);
 void cliOutString(CliOut_t * out, const char * text);   // as a JSON string, quoted

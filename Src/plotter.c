@@ -33,6 +33,7 @@
 #include "cmd_panel.h"
 #include "compare.h"
 #include "lang.h"
+#include "line_parser.h"
 #include "plot_export.h"
 #include "settings.h"
 #include "test_bench.h"
@@ -54,15 +55,6 @@
 #define PLOT_RENDER_MS        30          // charts are redrawn at most this often
 #define PLOT_RENDER_MIN_MS    16          // even at higher frame rates: new data at most ~60 x / s
 #define PLOT_VIEW_MIN         3           // smallest X zoom, in samples
-#define PLOT_LINE_MAX         1024        // room for 32 values per line
-#define ECHO_TIMEOUT_MS       2000        // a command's echo is expected within this time
-#define TEXT_FIELDS_NEW_RUNS  3           // lines with a new text field count before accepted
-// lv_chart stores int32 points: each plot maps its shown Y range (floats) on 0..CHART_RES, so the
-// precision follows the zoom. lv_chart computes point * height in int32: CHART_RES x the chart
-// height must stay below 2^31. Points out of the range are clamped (lv_chart draws them at the
-// edge anyway).
-#define CHART_RES             100000
-#define CHART_CLAMP           (CHART_RES * 100)
 #define PLOT_VALUE_MAX        10000000.0f // larger displayed values are not drawn
 #define PLOT_Y_RANGE_MIN      0.0005f     // smallest Y range: gridlines every 0.0001
 #define PLOT_Y_RANGE_REL      0.000002f   // ... and x the values (float precision: ~7 digits)
@@ -222,33 +214,6 @@ typedef struct
   lv_obj_t *          title;            // "P1" / "P1  name" in the title bar
 } Plot_t;
 
-// Received lines of one serial connection
-typedef struct
-{
-  char         line[PLOT_LINE_MAX];     // line being received
-  uint32_t     lineLen;
-  bool         lineDiscard;             // too long: ignored up to the next end of line
-
-  // Echo of a sent command: a device echoing it without a line break merges it with the next
-  // data line ("SP:17" + "13.07:..." = "SP:1713.07:...", a spike). Removed from the start of the
-  // lines received within ECHO_TIMEOUT_MS.
-  char         echoText[PLOT_LINE_MAX];
-  uint32_t     echoTime;
-  bool         echoPending;
-
-  // Number of text (non numeric) fields of the data lines: a line with another number is not
-  // data (ex: a reply merged into a data line), unless the new number repeats (new line format)
-  int32_t      textFieldsRef;
-  int32_t      textFieldsNew;
-  uint32_t     textFieldsNewRuns;
-
-  const char * separators;
-  bool         skipText;
-  uint32_t     varCount;                // values per line, 0 = as many as found
-  uint32_t     countSeen;               // most values found in a line (since the last clear)
-  bool         live;                    // has sent data: its values are held in the other samples
-} LineParser_t;
-
 // Command sent: number of the first sample received after it, label, color (the command's)
 typedef struct
 {
@@ -318,6 +283,7 @@ static lv_timer_t * renderTimerHandle;
 
 // Serial connections: received lines of each one, number in use (splits the variables)
 static LineParser_t parsers[PLOTTER_MAX_CONNS];
+static bool         connLive[PLOTTER_MAX_CONNS];  // has sent data: its values are held in the other samples
 static uint32_t     connCount = 1;
 
 // Cursors (vertical: position, horizontal: displayed value) and zoom selection
@@ -422,9 +388,6 @@ static void plotSelRefresh(void);
 static void plotEditorLoad(uint32_t p);
 
 static void    lineParse(uint32_t conn, char * text, uint32_t tick);
-static bool    fieldParse(char * field, float * value);
-static bool    textFieldsCheck(LineParser_t * parser, int32_t textFields);
-static char *  echoRemove(LineParser_t * parser, char * text);
 static void    sampleAdd(uint32_t conn, const float * values, const bool * valid, uint32_t count, uint32_t tick);
 static void    recordFeed(uint32_t conn, const float * values, const bool * valid, uint32_t count, uint32_t tick);
 static uint32_t connVarCount(void);
@@ -437,7 +400,6 @@ static void    cliLatestUpdate(uint32_t conn, const float * values, const bool *
 static bool    valueDrawable(float value);
 static void    pointStore(int32_t * point, float value);
 static float   pointLoad(const int32_t * point);
-static int32_t chartPoint(const Plot_t * plot, float value);
 static void    yRangeLimit(Plot_t * plot);
 static int     valueDecimals(const Plot_t * plot);
 static void    yAxisWidthUpdate(Plot_t * plot);
@@ -571,9 +533,7 @@ void plotterInit(lv_obj_t * plotTab)
 
   for (uint32_t c = 0; c < PLOTTER_MAX_CONNS; ++c)
   {
-    parsers[c].separators    = " ,;:\t";
-    parsers[c].skipText      = true;
-    parsers[c].textFieldsRef = -1;
+    lineParserInit(&parsers[c]);
   }
 
   for (uint32_t v = 0; v < PLOTTER_MAX_VARS; ++v)
@@ -648,37 +608,16 @@ void plotterFeed(uint32_t conn, const uint8_t * data, uint32_t len, uint32_t tic
     return;
   }
 
-  LineParser_t * parser = &parsers[conn];
+  uint32_t now = lv_tick_get();
 
   for (uint32_t i = 0; i < len; ++i)
   {
-    char c = (char) data[i];
+    char * text = lineParserByte(&parsers[conn], (char) data[i], now);
 
-    if ((c == '\n') || (c == '\r'))
+    // A reply with the device's settings is not data, even with numbers in it
+    if ((text != NULL) && !compareLineCapture(conn, text))
     {
-      if ((parser->lineLen > 0) && !parser->lineDiscard)
-      {
-        parser->line[parser->lineLen] = '\0';
-        char * text = echoRemove(parser, parser->line);
-
-        // A reply with the device's settings is not data, even with numbers in it
-        if (!compareLineCapture(conn, text))
-        {
-          lineParse(conn, text, tick);
-        }
-      }
-
-      parser->lineLen = 0;
-      parser->lineDiscard = false;
-    }
-    else if (parser->lineLen < (PLOT_LINE_MAX - 1))
-    {
-      parser->line[parser->lineLen++] = c;
-    }
-    else
-    {
-      // Line too long: ignore it up to the next end of line
-      parser->lineDiscard = true;
+      lineParse(conn, text, tick);
     }
   }
 }
@@ -689,22 +628,18 @@ void plotterResetLine(uint32_t conn)
 {
   if (conn < PLOTTER_MAX_CONNS)
   {
-    parsers[conn].lineLen       = 0;
-    parsers[conn].lineDiscard   = false;
-    parsers[conn].textFieldsRef = -1;
-    parsers[conn].live          = false;
+    lineParserReset(&parsers[conn]);
+    connLive[conn] = false;
   }
 }
 
-// A command was sent: its echo is removed from the next lines (see echoRemove), and it is
+// A command was sent: its echo is removed from the next lines (line_parser.c), and it is
 // marked on the plots (with several connections, its label starts with the connection)
 void plotterSent(uint32_t conn, const char * text, uint32_t markColor)
 {
   if (conn < PLOTTER_MAX_CONNS)
   {
-    snprintf(parsers[conn].echoText, sizeof(parsers[conn].echoText), "%s", text);
-    parsers[conn].echoTime    = lv_tick_get();
-    parsers[conn].echoPending = (text[0] != '\0');
+    lineParserSent(&parsers[conn], text, lv_tick_get());
 
     CmdMark_t * mark = &cmdMarks[cmdMarkHead];
 
@@ -770,9 +705,8 @@ void plotterClear(void)
 
   for (uint32_t c = 0; c < PLOTTER_MAX_CONNS; ++c)
   {
-    parsers[c].countSeen     = 0;
-    parsers[c].textFieldsRef = -1;
-    parsers[c].live          = false;
+    lineParserClear(&parsers[c]);
+    connLive[c] = false;
   }
 
   // No variable received: the settings list the connections' variables (and their default names)
@@ -786,10 +720,7 @@ void plotterSetLineFormat(uint32_t conn, const char * separators, bool skipText,
 {
   if (conn < PLOTTER_MAX_CONNS)
   {
-    parsers[conn].separators    = separators;
-    parsers[conn].skipText      = skipText;
-    parsers[conn].varCount      = LV_MIN(varCount, PLOTTER_MAX_VARS);
-    parsers[conn].textFieldsRef = -1;
+    lineParserSetFormat(&parsers[conn], separators, skipText, LV_MIN(varCount, PLOTTER_MAX_VARS));
   }
 }
 
@@ -1163,7 +1094,7 @@ static void plotCreate(uint32_t p)
 
   plot->yMin = -1.0f;
   plot->yMax = 1.0f;
-  lv_chart_set_axis_range(plot->chart, LV_CHART_AXIS_PRIMARY_Y, 0, CHART_RES);
+  lv_chart_set_axis_range(plot->chart, LV_CHART_AXIS_PRIMARY_Y, 0, UI_CHART_RES);
 
   lv_obj_add_event_cb(plot->chart, chartGridDrawEvent, LV_EVENT_DRAW_MAIN | LV_EVENT_PREPROCESS, userData);
   lv_obj_add_event_cb(plot->chart, chartDrawTaskEvent, LV_EVENT_DRAW_TASK_ADDED, userData);
@@ -1645,59 +1576,15 @@ static void varSave(uint32_t v)
 // Otherwise an empty / text field leaves a gap so the next values stay in their column.
 static void lineParse(uint32_t conn, char * text, uint32_t tick)
 {
-  LineParser_t * parser = &parsers[conn];
-
-  // At most the connection's share of the variables
-  uint32_t maxCount = (parser->varCount == 0) ? connVarCount() : LV_MIN(parser->varCount, connVarCount());
   float    values[PLOTTER_MAX_VARS];
   bool     valid[PLOTTER_MAX_VARS];
-  uint32_t count = 0;
-  uint32_t validCount = 0;
-  int32_t  textFields = 0;
-  char *   field = text;
+  // At most the connection's share of the variables; 0: not a data line
+  uint32_t count = lineParserValues(&parsers[conn], text, connVarCount(), values, valid);
 
-  while ((field != NULL) && (count < maxCount))
-  {
-    char * next = strpbrk(field, parser->separators);
-
-    if (next != NULL)
-    {
-      *next++ = '\0';
-    }
-
-    valid[count] = fieldParse(field, &values[count]);
-
-    if (valid[count])
-    {
-      validCount++;
-      count++;
-    }
-    else
-    {
-      textFields += (field[strspn(field, " \t")] != '\0') ? 1 : 0;
-      count += parser->skipText ? 0 : 1;
-    }
-
-    field = next;
-  }
-
-  // Ignore empty fields at the end of the line (ex: trailing separator)
-  while ((count > 0) && !valid[count - 1])
-  {
-    count--;
-  }
-
-  // Lines with fewer values than expected are not data (ex: the device's answer to a command
-  // sent from the terminal) and would draw spikes and gaps: with a fixed number of variables,
-  // fewer than that number; with Auto, fewer than the lines received so far (reset by Clear)
-  uint32_t expected = (parser->varCount != 0) ? maxCount : parser->countSeen;
-
-  if ((validCount == 0) || (count < expected) || !textFieldsCheck(parser, textFields))
+  if (count == 0)
   {
     return;
   }
-
-  parser->countSeen = LV_MAX(parser->countSeen, count);
 
 #ifdef SERIAL_DASHBOARD_CLI
   cliLatestUpdate(conn, values, valid, count);
@@ -1763,77 +1650,6 @@ static void recordFeed(uint32_t conn, const float * values, const bool * valid, 
   compareSampleAdd(recordRow, tick);
 }
 
-// A line with as many text fields as the data lines is data. One with another number is not
-// (ex: "SP:1713.07:..." has the extra text field "SP"), unless that number repeats for
-// TEXT_FIELDS_NEW_RUNS lines: the device's new line format.
-static bool textFieldsCheck(LineParser_t * parser, int32_t textFields)
-{
-  if ((parser->textFieldsRef < 0) || (textFields == parser->textFieldsRef))
-  {
-    parser->textFieldsRef = textFields;
-    parser->textFieldsNewRuns = 0;
-    return true;
-  }
-
-  parser->textFieldsNewRuns = (textFields == parser->textFieldsNew) ? (parser->textFieldsNewRuns + 1) : 1;
-  parser->textFieldsNew = textFields;
-
-  if (parser->textFieldsNewRuns < TEXT_FIELDS_NEW_RUNS)
-  {
-    return false;
-  }
-
-  parser->textFieldsRef = textFields;
-  parser->textFieldsNewRuns = 0;
-  return true;
-}
-
-// Line starting with the text just sent (within ECHO_TIMEOUT_MS): the rest of the line
-static char * echoRemove(LineParser_t * parser, char * text)
-{
-  if (!parser->echoPending)
-  {
-    return text;
-  }
-
-  size_t len = strlen(parser->echoText);
-
-  if (lv_tick_elaps(parser->echoTime) > ECHO_TIMEOUT_MS)
-  {
-    parser->echoPending = false;
-  }
-  else if (strncmp(text, parser->echoText, len) == 0)
-  {
-    parser->echoPending = false;
-    return &text[len];
-  }
-
-  return text;
-}
-
-// Reads one number; surrounding blanks are allowed. When ':' is not a separator,
-// "label:value" keeps the value part.
-static bool fieldParse(char * field, float * value)
-{
-  char * colon = strrchr(field, ':');
-  char * start = (colon != NULL) ? (colon + 1) : field;
-  char * end;
-
-  *value = strtof(start, &end);
-
-  if (end == start)
-  {
-    return false;
-  }
-
-  while ((*end == ' ') || (*end == '\t'))
-  {
-    end++;
-  }
-
-  return (*end == '\0') && isfinite(*value);
-}
-
 // New sample: the line's values for the connection's variables; the other connections' variables
 // keep their last value while those connections are live (otherwise: no value)
 // tick: when the line arrived (stamped by the serial reader thread)
@@ -1854,7 +1670,7 @@ static void sampleAdd(uint32_t conn, const float * values, const bool * valid, u
       history[v][historyHead] = ((i < count) && valid[i]) ? values[i] : NAN;
       seen |= (i < count) ? (1u << v) : 0;
     }
-    else if ((owner != CONN_NONE) && parsers[owner].live && (historyCount > 0))
+    else if ((owner != CONN_NONE) && connLive[owner] && (historyCount > 0))
     {
       history[v][historyHead] = history[v][previous];
     }
@@ -1864,7 +1680,7 @@ static void sampleAdd(uint32_t conn, const float * values, const bool * valid, u
     }
   }
 
-  parsers[conn].live = true;
+  connLive[conn] = true;
 
   if (seen != varSeenMask)
   {
@@ -1907,18 +1723,6 @@ static float pointLoad(const int32_t * point)
   float value;
   memcpy(&value, point, sizeof(value));
   return value;
-}
-
-// Chart point of a displayed value: its place in the plot's Y range, 0..CHART_RES
-static int32_t chartPoint(const Plot_t * plot, float value)
-{
-  if (isnan(value))
-  {
-    return LV_CHART_POINT_NONE;
-  }
-
-  double scaled = (((double) value - plot->yMin) * CHART_RES) / ((double) plot->yMax - plot->yMin);
-  return (int32_t) lround(LV_CLAMP(-(double) CHART_CLAMP, scaled, (double) CHART_CLAMP));
 }
 
 // The Y range is at least PLOT_Y_RANGE_MIN (and a few float steps of the values), around its center
@@ -2190,7 +1994,7 @@ static void plotsRender(void)
 
         for (uint32_t i = 0; i < pointCount; ++i)
         {
-          y[i] = chartPoint(plot, pointLoad(&y[i]));
+          y[i] = uiChartPoint(pointLoad(&y[i]), plot->yMin, plot->yMax);
         }
       }
     }
@@ -3117,7 +2921,7 @@ static void showInChecksSet(void)
 // in advance). The edited variable, when no longer listed, becomes the first one.
 static void varDropdownRefresh(void)
 {
-  char     options[PLOTTER_MAX_VARS * (PLOT_NAME_LEN + 6)];
+  char     options[PLOTTER_MAX_VARS * (PLOT_NAME_LEN + 6)] = "";
   size_t   used = 0;
   uint32_t selected = 0;
   bool     found = false;
@@ -3842,7 +3646,7 @@ static void windowResizeEvent(lv_event_t * e)
   uint32_t   w = (uintptr_t) lv_event_get_user_data(e);
   lv_point_t point;
   int32_t    targets[SNAP_TARGETS_MAX];
-  int32_t    delta;
+  int32_t    delta = 0;
 
   lv_indev_get_point(lv_indev_active(), &point);
 

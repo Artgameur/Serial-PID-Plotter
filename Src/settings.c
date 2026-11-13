@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <io.h>
 #include <windows.h>
 
 // ================================================================================================
@@ -21,7 +22,7 @@
 // ================================================================================================
 // ================================================================================================
 
-#define SETTINGS_MAX          512         // 32 variables x 8 settings, 8 plots, commands, ...
+#define SETTINGS_MAX          1024        // 32 variables x 7 settings, 8 plots x 10, commands, ... (~450 used)
 #define SETTINGS_KEY_LEN      32
 #define SETTINGS_VALUE_LEN    192         // room for a command with its values (cmd_panel.c)
 #define SETTINGS_PATH_LEN     MAX_PATH
@@ -111,6 +112,9 @@ void settingsInit(void)
   fileLoad(filePath);
   dirty = false;
   lv_timer_create(saveTimer, SETTINGS_SAVE_MS, NULL);
+  // Closing the window ends the process with exit() (LVGL's Windows driver): the changes of the
+  // last second are written then
+  atexit(settingsFlush);
 }
 
 // Changes written now (ex: before a restart), not at the next save timer
@@ -118,8 +122,7 @@ void settingsFlush(void)
 {
   if (dirty)
   {
-    dirty = false;
-    fileSave(filePath, true);
+    dirty = !fileSave(filePath, true);
   }
 }
 
@@ -235,8 +238,8 @@ bool settingsProfileLoad(const char * name)
   entryCount = kept;
   fileLoad(path);
   settingsSetString(SETTINGS_PROFILE_KEY, name);
-  dirty = false;
-  return fileSave(filePath, true);
+  dirty = !fileSave(filePath, true);
+  return !dirty;
 }
 
 bool settingsFileExport(const wchar_t * path, SettingsFileKind_t kind)
@@ -337,8 +340,8 @@ bool settingsFileImport(const wchar_t * path, SettingsFileKind_t * kind)
     settingsSetString(SETTINGS_PROFILE_KEY, "");
   }
 
-  dirty = false;
-  return fileSave(filePath, true);
+  dirty = !fileSave(filePath, true);
+  return !dirty;
 }
 
 bool settingsProfileDelete(const char * name)
@@ -582,10 +585,19 @@ static void fileLoad(const char * path)
   fclose(file);
 }
 
-// appSettings = false: without the app settings (profile)
+// appSettings = false: without the app settings (profile). Written to "<path>.tmp", which then
+// replaces the file: a crash or power cut while writing leaves the previous file whole.
 static bool fileSave(const char * path, bool appSettings)
 {
-  FILE * file = fopen(path, "w");
+  char   temp[SETTINGS_PATH_LEN + 8];
+  FILE * file;
+
+  if ((size_t) snprintf(temp, sizeof(temp), "%s.tmp", path) >= sizeof(temp))
+  {
+    return false;
+  }
+
+  file = fopen(temp, "w");
 
   if (file == NULL)
   {
@@ -600,7 +612,18 @@ static bool fileSave(const char * path, bool appSettings)
     }
   }
 
-  return fclose(file) == 0;
+  // On the disk before it replaces the file
+  bool ok = (fflush(file) == 0) && (_commit(_fileno(file)) == 0) && !ferror(file);
+
+  ok = (fclose(file) == 0) && ok;
+  ok = ok && MoveFileExA(temp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+
+  if (!ok)
+  {
+    DeleteFileA(temp);
+  }
+
+  return ok;
 }
 
 static SettingsEntry_t * entryFind(const char * key)
@@ -677,10 +700,10 @@ static void saveTimer(lv_timer_t * tim)
 {
   LV_UNUSED(tim);
 
+  // A failed write (ex: file locked by another program) is tried again at the next tick
   if (dirty)
   {
-    dirty = false;
-    fileSave(filePath, true);
+    dirty = !fileSave(filePath, true);
   }
 }
 
