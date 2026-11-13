@@ -1,0 +1,33 @@
+# Vendored LVGL library
+lvgl/
+
+# Build output
+cmake-build/
+build/
+agent/build/
+agent/dist/
+*.zip
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.dll
+*.pdb
+*.map
+*.elf
+*.d
+
+# Logs
+*.log
+
+# Machine-specific CMake presets (absolute compiler paths)
+CMakeUserPresets.json
+
+# Editor / OS
+.vs/
+*.swp
+Thumbs.db
+.DS_Store

@@ -1,0 +1,30 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-gcc",
+      "displayName": "Windows GCC",
+      "generator": "MinGW Makefiles",
+      "binaryDir": "${sourceDir}/cmake-build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "C:/w64devkit/bin/gcc.exe",
+        "CMAKE_MAKE_PROGRAM": "C:/w64devkit/bin/make.exe"
+      },
+      "environment": {
+        "PATH": "C:/w64devkit/bin;$penv{PATH}"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-gcc",
+      "configurePreset": "windows-gcc"
+    }
+  ]
+}

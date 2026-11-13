@@ -1,0 +1,4 @@
+// Icon of the program: the .exe file in Explorer, and the window (title bar, taskbar, Alt+Tab,
+// set by appWindowInit). Id 1 = APP_ICON_ID in app_window.c. Compiled only when Assets/app.ico
+// exists (CMakeLists.txt).
+1 ICON "Assets/app.ico"
