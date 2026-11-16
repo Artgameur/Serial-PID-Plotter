@@ -44,6 +44,8 @@
 #define TEST_PLATEAU_BLOCKS_MIN 3         // averages compared to tell a variable stopped changing
 #define TEST_PLATEAU_BLOCKS_MAX 256
 #define TEST_PLATEAU_PEAKS    3           // highest and lowest peaks compared
+#define TEST_BLOCK_SAMPLES    64          // samples per block summary (curves of long tests)
+#define TEST_BLOCK_NONE       UINT32_MAX  // a block summary without any value
 
 // ================================================================================================
 // ================================================================================================
@@ -66,6 +68,17 @@ typedef enum
 // ================================================================================================
 // ================================================================================================
 
+// Min / max of a column over a block of TEST_BLOCK_SAMPLES samples, with the first sample that has
+// each (TEST_BLOCK_NONE: no value in the block). testDataCurve then reads whole blocks instead of
+// their samples.
+typedef struct
+{
+  float    min;
+  float    max;
+  uint32_t minAt;
+  uint32_t maxAt;
+} TestBlock_t;
+
 typedef struct
 {
   char       name[TEST_NAME_LEN];
@@ -75,6 +88,7 @@ typedef struct
   char       headers[TEST_COLUMNS_MAX][TEST_HEADER_LEN];
   uint32_t * times;                       // [sampleCount]: ms since the start, not decreasing
   float *    values;                      // [sampleCount][columnCount]: NAN = no value
+  TestBlock_t * blocks;                   // [blocks of the samples][columnCount] (testDataAppend)
   int64_t    startMs;                     // Unix time of the start; 0: unknown (from a file)
   char       settings[TEST_SETTINGS_LEN]; // what the device replied, for the legend
   char       commands[TEST_COMMANDS_LEN]; // what was sent: the legend shows those settings

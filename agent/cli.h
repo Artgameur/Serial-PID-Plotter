@@ -48,6 +48,9 @@ typedef struct
 // ================================================================================================
 // ================================================================================================
 
+// LVGL tick of the tools: milliseconds, high resolution counter
+uint32_t cliTickGet(void);
+
 // Display flush of the tools: nothing is shown (pictures draw themselves)
 void cliFlushDiscard(lv_display_t * display, const lv_area_t * area, uint8_t * pixels);
 

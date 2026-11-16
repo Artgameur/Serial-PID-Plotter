@@ -2612,7 +2612,12 @@ static void readoutUpdate(void)
     snprintf(&text[used], sizeof(text) - used, "dY %.*f", decimals, (double) fabsf(hCursor[1] - hCursor[0]));
   }
 
-  lv_label_set_text(readoutLabel, text);
+  // Called at every redraw: set only when changed (each set lays the label out again)
+  if (strcmp(lv_label_get_text(readoutLabel), text) != 0)
+  {
+    lv_label_set_text(readoutLabel, text);
+  }
+
   lv_obj_set_hidden(readoutLabel, text[0] == '\0');
 }
 

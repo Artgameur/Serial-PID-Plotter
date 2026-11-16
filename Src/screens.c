@@ -134,6 +134,10 @@ typedef struct
   char           rxLine[CONN_LINE_MAX + 1];
   size_t         rxLineLen;
   uint32_t       rxLineTime;
+
+  // Receive queue problems already reported (serialStatsGet), for the open port
+  SerialStats_t  reported;
+  bool           backlogWarned;
 } Conn_t;
 
 static Conn_t           conns[CONN_MAX];
@@ -217,6 +221,10 @@ static size_t     logPendingLen;
 // fragmented by the plots), and LVGL then dropped it (the terminal wiped itself)
 static char       logText[LOG_MAX_LEN + 1];
 static size_t     logLen;
+// Serial tab hidden: the text is added to logText only, the label laid out again when shown
+// (laying out the whole text at each addition was the largest cost of the other tabs)
+static bool       logStale;
+static bool       logFollow = true;   // the view was at the end of the text: kept there
 static lv_obj_t * rxLog;
 static lv_obj_t * rxModeDropdown;
 static lv_obj_t * txInput;
@@ -267,6 +275,8 @@ static void logQueue(const char * text);
 static void logFlush(void);
 static void logInsert(const char * text);
 static void logFlushTimer(lv_timer_t * tim);
+static void rxQueueCheck(uint32_t conn);
+static void rxWarn(uint32_t conn, const char * text, bool toast);
 
 static void portScanTimer(lv_timer_t * tim);
 static void tabChangedEvent(lv_event_t * e);
@@ -411,6 +421,11 @@ void loadScreen(void)
   lv_timer_create(logFlushTimer, LOG_FLUSH_MS, NULL);
   portScanTimer(NULL);
   PROF_DO(profScenarioStart(tabview));
+
+  // Closing the window ends the process with exit() (LVGL's Windows driver): the reader threads
+  // are stopped first, not left running while the C library shuts down. Before settingsFlush
+  // (registered earlier, so called later).
+  atexit(portsCloseAll);
 
   lv_screen_load(screen);
 }
@@ -1228,11 +1243,13 @@ static void logFlush(void)
 static void logInsert(const char * text)
 {
   size_t len = strlen(text);
+  bool   shown = lv_tabview_get_tab_active(tabview) == TAB_SERIAL;
 
   PROF_PUSH(PROF_TERMINAL_LABEL);
 
-  // Following the new text (view at the bottom): kept at the bottom after the update
-  bool atBottom = lv_obj_get_scroll_bottom(rxLog) <= uiPx(4);
+  // Following the new text (view at the bottom): kept at the bottom after the update. Hidden: as
+  // it was when last shown.
+  bool atBottom = shown ? (lv_obj_get_scroll_bottom(rxLog) <= uiPx(4)) : logFollow;
 
   // Longer than the whole log: only its end is kept
   if (len > LOG_TRIM_LEN)
@@ -1260,6 +1277,14 @@ static void logInsert(const char * text)
   memcpy(&logText[logLen], text, len);
   logLen += len;
   logText[logLen] = '\0';
+  logFollow = atBottom;
+
+  if (!shown)
+  {
+    logStale = true;
+    PROF_POP();
+    return;
+  }
 
   // Same buffer: the label only refreshes (no copy, no LVGL heap)
   lv_label_set_text_static(lv_textarea_get_label(rxLog), logText);
@@ -1282,6 +1307,11 @@ static void logFlushTimer(lv_timer_t * tim)
 {
   LV_UNUSED(tim);
 
+  for (uint32_t c = 0; c < connCount; ++c)
+  {
+    rxQueueCheck(c);
+  }
+
   // Several connections: a line still without its end is shown after CONN_LINE_MS
   for (uint32_t c = 0; (c < connCount) && (connCount > 1); ++c)
   {
@@ -1295,6 +1325,75 @@ static void logFlushTimer(lv_timer_t * tim)
   {
     logFlush();
   }
+}
+
+// Tells in the terminal (and a message over the window) when received data had to wait or was
+// lost before the app, and when the app falls behind the data (more than half the queue waiting)
+static void rxQueueCheck(uint32_t conn)
+{
+  Conn_t *      c = &conns[conn];
+  SerialStats_t stats;
+  char          text[200];
+
+  if (!serialStatsGet(&c->port, &stats))
+  {
+    memset(&c->reported, 0, sizeof(c->reported));
+    c->backlogWarned = false;
+    return;
+  }
+
+  if (stats.fullWaits != c->reported.fullWaits)
+  {
+    snprintf(text, sizeof(text), tr("[%s: receive queue full, reading paused %lu ms (data kept; the device may have been held back)]\n"),
+             c->port.name, (unsigned long) (stats.fullWaitMs - c->reported.fullWaitMs));
+    rxWarn(conn, text, true);
+  }
+
+  if (stats.driverOverruns != c->reported.driverOverruns)
+  {
+    snprintf(text, sizeof(text), tr("[%s: Windows reports received data lost before the app could read it]\n"), c->port.name);
+    rxWarn(conn, text, true);
+  }
+
+  if (stats.lineErrors != c->reported.lineErrors)
+  {
+    snprintf(text, sizeof(text), tr("[%s: framing / parity errors reported by Windows]\n"), c->port.name);
+    rxWarn(conn, text, false);
+  }
+
+  uint32_t percent = (uint32_t) ((100ull * stats.queuedChunks) / LV_MAX(stats.capacityChunks, 1u));
+
+  percent = LV_MAX(percent, (uint32_t) ((100ull * stats.queuedBytes) / LV_MAX(stats.capacityBytes, 1u)));
+
+  // Once, until it drains
+  if ((percent >= 50) && !c->backlogWarned)
+  {
+    snprintf(text, sizeof(text), tr("[%s: %lu%% of the receive queue waiting (the app is behind the data)]\n"), c->port.name,
+             (unsigned long) percent);
+    rxWarn(conn, text, true);
+    c->backlogWarned = true;
+  }
+  else if (percent < 10)
+  {
+    c->backlogWarned = false;
+  }
+
+  c->reported = stats;
+}
+
+// In the terminal, over the window (toast) and to the command line tool's messages
+static void rxWarn(uint32_t conn, const char * text, bool toast)
+{
+  connLog(conn, text);
+
+  if (toast)
+  {
+    plotterToast(text);
+  }
+
+#ifdef SERIAL_DASHBOARD_CLI
+  cliMessage(text);
+#endif
 }
 
 // Detects VCOM devices being plugged / unplugged, and reconnects the connections waiting for
@@ -1343,6 +1442,19 @@ static void portScanTimer(lv_timer_t * tim)
 static void tabChangedEvent(lv_event_t * e)
 {
   LV_UNUSED(e);
+
+  // Terminal text added while hidden: laid out once now
+  if ((lv_tabview_get_tab_active(tabview) == TAB_SERIAL) && logStale)
+  {
+    logStale = false;
+    lv_label_set_text_static(lv_textarea_get_label(rxLog), logText);
+
+    if (logFollow)
+    {
+      lv_obj_update_layout(rxLog);
+      lv_obj_scroll_by(rxLog, 0, -lv_obj_get_scroll_bottom(rxLog), LV_ANIM_OFF);
+    }
+  }
 
   // The settings panel covers the tabs; its text box is the profile name
   if (!lv_obj_is_hidden(settingsOverlay))

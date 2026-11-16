@@ -88,6 +88,9 @@ void appWindowNotify(const char * title, const char * text);
 // profile) and ends this instance; returns only if the new instance could not be started
 void appWindowRestart(void);
 
+// Waits ms milliseconds, to within about a millisecond (main loop, between lv_timer_handler() calls)
+void appWindowWait(uint32_t ms);
+
 // Windows "Open" / "Save as" dialog, modal to owner (HWND of the app's window, read in the LVGL
 // thread: lv_windows_get_display_window_handle()). Blocks until it closes:
 // call it from a thread of its own (it sets up COM for it), not from the LVGL thread.

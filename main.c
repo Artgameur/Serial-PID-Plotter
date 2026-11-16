@@ -47,7 +47,7 @@ int main()
         PROF_DO(profLoop(handlerStart);)
         // handle LV_NO_TIMER_READY. Another option is to always sleep a few milliseconds
         if(time_till_next == LV_NO_TIMER_READY) time_till_next = LV_DEF_REFR_PERIOD;
-        lv_sleep_ms(time_till_next);
+        appWindowWait(time_till_next);
     }
     return 0;
 }

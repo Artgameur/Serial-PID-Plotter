@@ -65,6 +65,18 @@
 #define BENCH_METERS_PER_INCH 0.0254
 #define BENCH_NUMBER_WIDTH    uiPx(72)
 #define BENCH_NOTIFY_TITLE    "Serial Dashboard"
+#define BENCH_PICTURE_JOBS    2           // pictures encoded at once in the background (each holds
+                                          // its snapshot, up to 6000 x 6000 x 4 bytes); more: on
+                                          // the LVGL thread, as before
+#define PICTURE_FREE          0
+#define PICTURE_BUSY          1
+#define PICTURE_DONE          2
+
+// lodepng allocates with lv_malloc() in the encoding thread: thread safe with the C library's
+// malloc only
+#if LV_USE_STDLIB_MALLOC != LV_STDLIB_CLIB
+#error "test_bench.c encodes pictures in a thread: LV_USE_STDLIB_MALLOC must be LV_STDLIB_CLIB"
+#endif
 
 // ================================================================================================
 // ================================================================================================
@@ -91,6 +103,22 @@ static wchar_t       browsePath[MAX_PATH];
 static volatile LONG browseDone;
 static bool          browseChosen;
 
+// Picture encoded and written in its own thread. The snapshot is taken and destroyed on the LVGL
+// thread (pollTimer); the thread only reads its pixels.
+typedef struct
+{
+  volatile LONG   state;                  // PICTURE_xxx
+  lv_draw_buf_t * snapshot;
+  lv_color_t      background;
+  bool            reported;
+  int32_t         ppi;
+  bool            savedMessage;           // "Picture saved" when done (otherwise only a failure)
+  bool            ok;
+  char            path[BENCH_PATH_LEN];
+} PictureJob_t;
+
+static PictureJob_t pictureJobs[BENCH_PICTURE_JOBS];
+
 // ================================================================================================
 // ================================================================================================
 //            PRIVATE FUNCTION DECLARATION
@@ -99,7 +127,10 @@ static bool          browseChosen;
 
 static bool baseNameGet(const char * name, char * base, uint32_t size);
 static void pathGet(const char * base, const char * extension, char * path, uint32_t size);
-static bool pictureSave(lv_obj_t * obj, const char * path);
+static bool pictureSave(lv_obj_t * obj, const char * path, bool savedMessage, bool wait);
+static bool pictureEncode(const lv_draw_buf_t * snapshot, lv_color_t background, bool reported, int32_t ppi, const char * path);
+static unsigned __stdcall pictureThread(void * arg);
+static void pictureJobsCheck(void);
 
 static lv_obj_t * reportInputCreate(lv_obj_t * row, lv_group_t * group, const char * key, const char * fallback, const char * accepted);
 static bool formatRead(float * ratio);
@@ -226,7 +257,8 @@ void benchTestSave(const TestData_t * test, lv_obj_t * obj)
 
   pathGet(base, "png", path, sizeof(path));
 
-  if (!pictureSave(obj, path))
+  // A failure in the background is told by pictureJobsCheck
+  if (!pictureSave(obj, path, false, false))
   {
     snprintf(message, sizeof(message), tr("Could not write %s"), path);
     plotterToast(message);
@@ -246,8 +278,13 @@ void benchScreenshot(lv_obj_t * obj, const char * name)
   }
 
   pathGet(base, "png", path, sizeof(path));
-  snprintf(message, sizeof(message), tr(pictureSave(obj, path) ? "Picture saved: %s" : "Could not write %s"), path);
-  plotterToast(message);
+
+  // Done in the background: the message comes then (pictureJobsCheck)
+  if (!pictureSave(obj, path, true, false))
+  {
+    snprintf(message, sizeof(message), tr("Could not write %s"), path);
+    plotterToast(message);
+  }
 }
 
 #ifdef SERIAL_DASHBOARD_CLI
@@ -264,7 +301,7 @@ bool benchCliPictureSet(const char * format, const char * inches, const char * p
 
 bool benchCliPictureWrite(lv_obj_t * obj, const char * path)
 {
-  return pictureSave(obj, path);
+  return pictureSave(obj, path, false, true);
 }
 #endif
 
@@ -361,7 +398,10 @@ static void pathGet(const char * base, const char * extension, char * path, uint
   snprintf(path, size, "%s\\%s.%s", lv_textarea_get_text(folderInput), base, extension);
 }
 
-static bool pictureSave(lv_obj_t * obj, const char * path)
+// The snapshot is taken here (LVGL thread); the conversion, PNG encoding and file writing are done
+// in a thread (wait = false, a free job) or here (wait = true, or none free). false: no snapshot,
+// or (here) the file could not be written; a background failure is told by pictureJobsCheck.
+static bool pictureSave(lv_obj_t * obj, const char * path, bool savedMessage, bool wait)
 {
   PROF_PUSH(PROF_PICTURE);
   lv_draw_buf_t * snapshot = lv_snapshot_take(obj, LV_COLOR_FORMAT_ARGB8888);
@@ -372,6 +412,92 @@ static bool pictureSave(lv_obj_t * obj, const char * path)
     return false;
   }
 
+  BenchPicture_t picture;
+  bool           reported   = benchPictureGet(&picture);
+  lv_color_t     background = reported ? lv_color_white() : lv_obj_get_style_bg_color(lv_screen_active(), LV_PART_MAIN);
+
+#ifdef SD_PROFILE
+  // Measurement of the former way (everything on the LVGL thread)
+  wait = wait || (getenv("SD_PROFILE_PICTURE_SYNC") != NULL);
+#endif
+
+  for (uint32_t j = 0; (j < BENCH_PICTURE_JOBS) && !wait; ++j)
+  {
+    PictureJob_t * job = &pictureJobs[j];
+
+    if (job->state != PICTURE_FREE)
+    {
+      continue;
+    }
+
+    job->snapshot     = snapshot;
+    job->background   = background;
+    job->reported     = reported;
+    job->ppi          = reported ? picture.ppi : 0;
+    job->savedMessage = savedMessage;
+    job->ok           = false;
+    snprintf(job->path, sizeof(job->path), "%s", path);
+    job->state        = PICTURE_BUSY;
+
+    uintptr_t thread = _beginthreadex(NULL, 0, pictureThread, job, 0, NULL);
+
+    if (thread != 0)
+    {
+      CloseHandle((HANDLE) thread);
+      PROF_POP();
+      return true;
+    }
+
+    job->state = PICTURE_FREE;
+    break;
+  }
+
+  bool ok = pictureEncode(snapshot, background, reported, reported ? picture.ppi : 0, path);
+
+  lv_draw_buf_destroy(snapshot);
+  PROF_POP();
+  return ok;
+}
+
+static unsigned __stdcall pictureThread(void * arg)
+{
+  PictureJob_t * job = arg;
+
+  job->ok = pictureEncode(job->snapshot, job->background, job->reported, job->ppi, job->path);
+  InterlockedExchange(&job->state, PICTURE_DONE);
+  return 0;
+}
+
+// LVGL thread: pictures done in the background (snapshot destroyed, result told)
+static void pictureJobsCheck(void)
+{
+  static char message[BENCH_MESSAGE_LEN];
+
+  for (uint32_t j = 0; j < BENCH_PICTURE_JOBS; ++j)
+  {
+    PictureJob_t * job = &pictureJobs[j];
+
+    if (InterlockedCompareExchange(&job->state, PICTURE_DONE, PICTURE_DONE) != PICTURE_DONE)
+    {
+      continue;
+    }
+
+    lv_draw_buf_destroy(job->snapshot);
+    job->snapshot = NULL;
+
+    if (!job->ok || job->savedMessage)
+    {
+      snprintf(message, sizeof(message), tr(job->ok ? "Picture saved: %s" : "Could not write %s"), job->path);
+      plotterToast(message);
+    }
+
+    InterlockedExchange(&job->state, PICTURE_FREE);
+  }
+}
+
+// Any thread: no LVGL object or style used (the snapshot's pixels are only read)
+static bool pictureEncode(const lv_draw_buf_t * snapshot, lv_color_t background, bool reported, int32_t ppi, const char * path)
+{
   uint32_t        width  = snapshot->header.w;
   uint32_t        height = snapshot->header.h;
   uint8_t *       rgb    = malloc((size_t) width * height * BENCH_BYTES_RGB);
@@ -381,9 +507,6 @@ static bool pictureSave(lv_obj_t * obj, const char * path)
 
   if (rgb != NULL)
   {
-    BenchPicture_t  picture;
-    bool            reported   = benchPictureGet(&picture);
-    lv_color_t      background = reported ? lv_color_white() : lv_obj_get_style_bg_color(lv_screen_active(), LV_PART_MAIN);
     uint8_t *       write = rgb;
 
     // Blue, green, red, alpha in memory
@@ -414,7 +537,7 @@ static bool pictureSave(lv_obj_t * obj, const char * path)
     {
       state.info_png.phys_defined = 1;
       state.info_png.phys_unit    = 1;
-      state.info_png.phys_x       = (unsigned) lround((double) picture.ppi / BENCH_METERS_PER_INCH);
+      state.info_png.phys_x       = (unsigned) lround((double) ppi / BENCH_METERS_PER_INCH);
       state.info_png.phys_y       = state.info_png.phys_x;
     }
 
@@ -443,15 +566,16 @@ static bool pictureSave(lv_obj_t * obj, const char * path)
   // lodepng allocates with LVGL's functions
   lv_free(png);
   free(rgb);
-  lv_draw_buf_destroy(snapshot);
-  PROF_POP();
   return ok;
 }
 
-// A CSV written in the background failed; the folder dialog closed
+// A CSV written in the background failed; pictures done in the background; the folder dialog
+// closed
 static void pollTimer(lv_timer_t * tim)
 {
   LV_UNUSED(tim);
+
+  pictureJobsCheck();
 
   if (plotExportSaveFailures() > 0)
   {

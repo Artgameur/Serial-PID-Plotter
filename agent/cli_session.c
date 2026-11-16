@@ -160,7 +160,6 @@ static char             settingsUsed[MAX_PATH * 2];
 // ================================================================================================
 
 static uint32_t     nowMs(void);
-static uint32_t     tickGet(void);
 static const char * optionGet(int argc, char ** argv, const char * name);
 static bool         flagGet(int argc, char ** argv, const char * name);
 static uint32_t     positionals(int argc, char ** argv, char ** out, uint32_t max);
@@ -378,7 +377,7 @@ int cliServe(int argc, char ** argv)
 
   startTick = GetTickCount();
   lv_init();
-  lv_tick_set_cb(tickGet);
+  lv_tick_set_cb(cliTickGet);
 
   lv_display_t * display = lv_display_create(DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
@@ -692,9 +691,16 @@ static uint32_t nowMs(void)
   return GetTickCount() - startTick;
 }
 
-static uint32_t tickGet(void)
+// Milliseconds of the high resolution counter, as the app's LVGL Windows driver: GetTickCount()
+// steps by ~15.6 ms, which the received samples' times then had
+uint32_t cliTickGet(void)
 {
-  return GetTickCount();
+  LARGE_INTEGER frequency;
+  LARGE_INTEGER now;
+
+  QueryPerformanceFrequency(&frequency);
+  QueryPerformanceCounter(&now);
+  return (uint32_t) ((now.QuadPart * 1000) / frequency.QuadPart);
 }
 
 

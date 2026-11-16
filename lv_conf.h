@@ -272,7 +272,9 @@
 
 #if LV_USE_OS != LV_OS_NONE
 /** Number of threads used to render a frame in parallel */
+#ifndef LV_DRAW_SW_DRAW_UNIT_CNT     /* a test build may set it (-DLV_DRAW_SW_DRAW_UNIT_CNT=n) */
 #define LV_DRAW_SW_DRAW_UNIT_CNT 4   /* large windows (ex: 2880 x 1800) are drawn on 4 cores */
+#endif
 
 #endif /*LV_USE_OS != LV_OS_NONE*/
 

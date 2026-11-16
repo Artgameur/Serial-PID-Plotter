@@ -15,6 +15,7 @@
 #include <psapi.h>
 
 #include "compare.h"
+#include "test_bench.h"
 
 // ================================================================================================
 //            PRIVATE DEFINE / STRUCTURE / VARIABLE DECLARATION
@@ -41,7 +42,7 @@ typedef struct
 static const char * const stageNames[PROF_STAGE_COUNT] =
 {
   "acq", "queue", "terminal", "terminal_label", "parse", "record", "plot_store", "plot_prep",
-  "compare_prep", "layout", "render", "picture", "settings_save", "port_scan", "ui_loop",
+  "compare_prep", "layout", "render", "flush", "picture", "settings_save", "port_scan", "ui_loop",
 };
 
 static LARGE_INTEGER    frequency;
@@ -49,6 +50,14 @@ static ProfStat_t       stats[PROF_STAGE_COUNT];
 static volatile LONG64  acqTotal;         // from the reader threads
 static volatile LONG64  acqMax;
 static volatile LONG    acqCalls;
+static volatile LONG    queueHigh;        // most chunks waiting in a queue (in the period)
+static volatile LONG64  stampDelayTotal;  // simulated lines: lateness of their stamps (in the period)
+static volatile LONG64  stampDelayMax;
+static volatile LONG    stampDelayCount;
+static uint64_t         stampDelayMaxEver;
+static bool             readerPriority;
+static volatile LONG    queueWaitMs;      // readers waiting for room (in the period)
+static uint64_t         queueWaitTotal;
 static ProfFrame_t      stack[PROF_STACK_MAX];
 static uint32_t         depth;
 
@@ -158,7 +167,7 @@ static void header(void)
     fprintf(logFile, ",c%u_lines,c%u_seq_gaps,c%u_seq_lost", c + 1, c + 1, c + 1);
   }
 
-  fprintf(logFile, ",samples_plotted,samples_recorded,view_samples,chart_points\n");
+  fprintf(logFile, ",samples_plotted,samples_recorded,view_samples,chart_points,queue_high_chunks,queue_wait_ms,stamp_delay_avg_ms,stamp_delay_max_ms\n");
 }
 
 static void rowWrite(double seconds)
@@ -192,8 +201,17 @@ static void rowWrite(double seconds)
     lines[c] = seqGaps[c] = seqLost[c] = 0;
   }
 
-  fprintf(logFile, ",%llu,%llu,%llu,%llu\n", (unsigned long long) samplesPlotted, (unsigned long long) samplesRecorded,
-          (unsigned long long) viewSamples, (unsigned long long) chartPoints);
+  LONG waited = InterlockedExchange(&queueWaitMs, 0);
+
+  queueWaitTotal += (uint64_t) waited;
+  LONG64 delayTotal = InterlockedExchange64(&stampDelayTotal, 0);
+  LONG64 delayMax   = InterlockedExchange64(&stampDelayMax, 0);
+  LONG   delayCount = InterlockedExchange(&stampDelayCount, 0);
+
+  stampDelayMaxEver = LV_MAX(stampDelayMaxEver, (uint64_t) delayMax);
+  fprintf(logFile, ",%llu,%llu,%llu,%llu,%ld,%ld,%.3f,%.3f\n", (unsigned long long) samplesPlotted, (unsigned long long) samplesRecorded,
+          (unsigned long long) viewSamples, (unsigned long long) chartPoints, (long) InterlockedExchange(&queueHigh, 0), (long) waited,
+          (delayCount > 0) ? ticksMs((uint64_t) delayTotal) / delayCount : 0.0, ticksMs((uint64_t) delayMax));
   fflush(logFile);
 
   memset(stats, 0, sizeof(stats));
@@ -217,8 +235,8 @@ static void summaryWrite(void)
             (unsigned long long) lostTotal[c]);
   }
 
-  fprintf(logFile, "# summary ui_loop_max_ms=%.2f run_s=%.1f\n", ticksMs(handlerMaxEver),
-          ticksMs(profNow() - appStart) / 1000.0);
+  fprintf(logFile, "# summary ui_loop_max_ms=%.2f run_s=%.1f queue_wait_ms=%llu stamp_delay_max_ms=%.3f\n", ticksMs(handlerMaxEver),
+          ticksMs(profNow() - appStart) / 1000.0, (unsigned long long) queueWaitTotal, ticksMs(stampDelayMaxEver));
   fclose(logFile);
   logFile = NULL;
 }
@@ -238,6 +256,13 @@ static void tabTimer(lv_timer_t * tim)
 static void stallTimer(lv_timer_t * tim)
 {
   Sleep((DWORD) (uintptr_t) lv_timer_get_user_data(tim));
+}
+
+// A picture of the whole window saved in the test bench folder (as the screenshot buttons)
+static void pictureTimer(lv_timer_t * tim)
+{
+  LV_UNUSED(tim);
+  benchScreenshot(lv_screen_active(), "profile");
 }
 
 static void recordTimer(lv_timer_t * tim)
@@ -337,6 +362,39 @@ void profLine(uint32_t conn, const float * values, uint32_t count)
   }
 }
 
+void profQueueDepth(uint32_t chunks)
+{
+  LONG seen = queueHigh;
+
+  while (((LONG) chunks > seen) && (InterlockedCompareExchange(&queueHigh, (LONG) chunks, seen) != seen))
+  {
+    seen = queueHigh;
+  }
+}
+
+void profQueueWait(uint32_t ms)
+{
+  InterlockedExchangeAdd(&queueWaitMs, (LONG) ms);
+}
+
+void profStampDelay(uint64_t ticks)
+{
+  LONG64 seen = stampDelayMax;
+
+  InterlockedAdd64(&stampDelayTotal, (LONG64) ticks);
+  InterlockedIncrement(&stampDelayCount);
+
+  while (((LONG64) ticks > seen) && (InterlockedCompareExchange64(&stampDelayMax, (LONG64) ticks, seen) != seen))
+  {
+    seen = stampDelayMax;
+  }
+}
+
+bool profReaderPriority(void)
+{
+  return readerPriority;
+}
+
 void profSamplesPlotted(uint32_t count)
 {
   samplesPlotted += count;
@@ -380,6 +438,21 @@ void profInit(lv_display_t * display)
   simPorts    = LV_MIN(envInt("SD_SIM_PORTS", 0), PROF_CONN_MAX);
   simRate     = LV_MAX(envInt("SD_SIM_RATE", 1000), 1);
   simValues   = LV_CLAMP(1, envInt("SD_SIM_VALUES", 8), 32);
+  readerPriority = envInt("SD_READER_PRIO", 0) != 0;
+
+  // Tests of the drawing threads: tiles per redrawn area, cores the app may use
+  uint32_t     tiles    = envInt("SD_TILES", 0);
+  const char * affinity = getenv("SD_AFFINITY");
+
+  if (tiles > 0)
+  {
+    lv_display_set_tile_cnt(display, LV_MIN(tiles, 255));
+  }
+
+  if ((affinity != NULL) && (affinity[0] != '\0'))
+  {
+    SetProcessAffinityMask(GetCurrentProcess(), (DWORD_PTR) strtoull(affinity, NULL, 16));
+  }
 
   if ((logPath == NULL) || (logPath[0] == '\0'))
   {
@@ -394,6 +467,12 @@ void profInit(lv_display_t * display)
 
   if (logFile != NULL)
   {
+    DWORD_PTR processMask = 0;
+    DWORD_PTR systemMask  = 0;
+
+    GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask);
+    fprintf(logFile, "# config draw_threads=%d tiles=%lu cores=%d reader_prio=%d\n", LV_DRAW_SW_DRAW_UNIT_CNT,
+            (unsigned long) lv_display_get_tile_cnt(display), __builtin_popcountll((unsigned long long) processMask), readerPriority ? 1 : 0);
     header();
   }
 
@@ -428,6 +507,13 @@ void profScenarioStart(lv_obj_t * tabview)
   if (seconds > 0)
   {
     lv_timer_create(exitTimer, seconds * 1000, NULL);
+  }
+
+  uint32_t picture = envInt("SD_PROFILE_PICTURE", 0);
+
+  if (picture > 0)
+  {
+    lv_timer_create(pictureTimer, picture * 1000, NULL);
   }
 
   // "<ms>,<every s>"

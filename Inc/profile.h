@@ -10,6 +10,13 @@
      SD_PROFILE_TAB=<0|1|2>          tab shown at start (Serial, Plot, Compare)
      SD_PROFILE_RECORD_AFTER=<s>     a test recording starts on C1 after s seconds
      SD_PROFILE_STALL=<ms>,<s>       the LVGL thread is held ms milliseconds every s seconds
+     SD_PROFILE_PICTURE=<s>          a picture of the window is saved every s seconds (test bench
+                                     folder: set benchFolder in the settings)
+     SD_PROFILE_PICTURE_SYNC=1       pictures encoded on the LVGL thread (the former way)
+     SD_TILES=<n>                    LVGL tiles per redrawn area (default: the draw threads)
+     SD_AFFINITY=<hex mask>          the app runs on these cores only (ex: F = 4 cores)
+     SD_READER_PRIO=1                serial reader threads at THREAD_PRIORITY_HIGHEST
+     SD_FLUSH_FULL=1                 the whole window copied after each frame (the driver's way)
      SD_SIM_PORTS=<1..4>             simulated ports SIM1..SIMn listed with the real ones
      SD_SIM_RATE=<lines/s>           lines per second of each simulated port (default 1000)
      SD_SIM_VALUES=<n>               values per line, the first one a sequence number (default 8)
@@ -37,7 +44,8 @@ typedef enum
   PROF_PLOT_PREP,       // plot chart data prepared (min / max per pixel column, Y range)
   PROF_COMPARE_PREP,    // Compare graph data prepared
   PROF_LAYOUT,          // LVGL layout before a refresh
-  PROF_RENDER,          // LVGL rendering and flush to the window
+  PROF_RENDER,          // LVGL rendering
+  PROF_FLUSH,           // rendered image copied to the window
   PROF_PICTURE,         // report picture saved (snapshot, conversion, PNG, file)
   PROF_SETTINGS_SAVE,   // settings file written
   PROF_PORT_SCAN,       // serial port list checked
@@ -64,6 +72,15 @@ void profLine(uint32_t conn, const float * values, uint32_t count);
 void profSamplesPlotted(uint32_t count);
 void profSamplesRecorded(uint32_t count);
 void profChartPoints(uint32_t viewSamples, uint32_t points);
+
+// Serial reader threads: chunks waiting in a receive queue after a push; time waited for room
+void profQueueDepth(uint32_t chunks);
+void profQueueWait(uint32_t ms);
+
+// Simulated ports: how late a line was stamped compared with when it was due (ticks of profNow())
+void profStampDelay(uint64_t ticks);
+// Reader threads: raised priority asked (SD_READER_PRIO)
+bool profReaderPriority(void);
 
 // LVGL thread: once at start (display events, scenario), then after each lv_timer_handler()
 void profInit(lv_display_t * display);

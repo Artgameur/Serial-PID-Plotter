@@ -118,6 +118,7 @@ static const ExprFunction_t functions[] =
 // ================================================================================================
 
 static uint32_t csvSplit(char * line, char ** fields, uint32_t max);
+static size_t   blockCount(uint32_t samples);
 static bool     nameSame(const char * a, size_t aLen, const char * b, size_t bLen);
 static void     peakKeep(float * peaks, uint32_t * count, float value);
 static float    peaksAverage(const float * peaks, uint32_t count);
@@ -163,8 +164,9 @@ TestData_t * testDataCreate(uint32_t columnCount)
   test->capacity    = TEST_CAPACITY_START;
   test->times       = malloc(test->capacity * sizeof(uint32_t));
   test->values      = malloc((size_t) test->capacity * columnCount * sizeof(float));
+  test->blocks      = malloc(blockCount(test->capacity) * columnCount * sizeof(TestBlock_t));
 
-  if ((test->times == NULL) || (test->values == NULL))
+  if ((test->times == NULL) || (test->values == NULL) || (test->blocks == NULL))
   {
     testDataFree(test);
     return NULL;
@@ -179,6 +181,7 @@ void testDataFree(TestData_t * test)
   {
     free(test->times);
     free(test->values);
+    free(test->blocks);
     free(test);
   }
 }
@@ -209,12 +212,53 @@ bool testDataAppend(TestData_t * test, uint32_t timeMs, const float * row)
       return false;
     }
 
-    test->values   = values;
+    test->values = values;
+
+    TestBlock_t * blocks = realloc(test->blocks, blockCount(capacity) * test->columnCount * sizeof(TestBlock_t));
+
+    if (blocks == NULL)
+    {
+      return false;
+    }
+
+    test->blocks   = blocks;
     test->capacity = capacity;
   }
 
-  test->times[test->sampleCount] = timeMs;
-  memcpy(&test->values[(size_t) test->sampleCount * test->columnCount], row, test->columnCount * sizeof(float));
+  uint32_t      s     = test->sampleCount;
+  TestBlock_t * block = &test->blocks[(size_t) (s / TEST_BLOCK_SAMPLES) * test->columnCount];
+
+  test->times[s] = timeMs;
+  memcpy(&test->values[(size_t) s * test->columnCount], row, test->columnCount * sizeof(float));
+
+  // Block summary: as testDataCurve scans the samples (strict comparisons: the first one wins)
+  for (uint32_t c = 0; c < test->columnCount; ++c)
+  {
+    float value = row[c];
+
+    if ((s % TEST_BLOCK_SAMPLES) == 0)
+    {
+      block[c] = (TestBlock_t) {NAN, NAN, TEST_BLOCK_NONE, TEST_BLOCK_NONE};
+    }
+
+    if (isnan(value))
+    {
+      continue;
+    }
+
+    if ((block[c].minAt == TEST_BLOCK_NONE) || (value < block[c].min))
+    {
+      block[c].min   = value;
+      block[c].minAt = s;
+    }
+
+    if ((block[c].maxAt == TEST_BLOCK_NONE) || (value > block[c].max))
+    {
+      block[c].max   = value;
+      block[c].maxAt = s;
+    }
+  }
+
   test->sampleCount++;
   return true;
 }
@@ -382,9 +426,56 @@ void testDataCurve(const TestData_t * test, uint32_t column, double startS, doub
     uint32_t maxAt = 0;
     bool     any   = false;
 
-    for (; (s < test->sampleCount) && (last ? ((double) test->times[s] <= binEnd) : ((double) test->times[s] < binEnd)); ++s)
+    // Samples of the column: s up to the first one not in it (the times do not decrease)
+    uint32_t end  = s;
+    uint32_t high = test->sampleCount;
+
+    while (end < high)
     {
+      uint32_t middle = end + ((high - end) / 2);
+
+      if (last ? ((double) test->times[middle] <= binEnd) : ((double) test->times[middle] < binEnd))
+      {
+        end = middle + 1;
+      }
+      else
+      {
+        high = middle;
+      }
+    }
+
+    // Whole blocks from their summary, the samples around them one by one: the same result as
+    // all the samples one by one (same strict comparisons, in the same order)
+    while (s < end)
+    {
+      if (((s % TEST_BLOCK_SAMPLES) == 0) && ((end - s) >= TEST_BLOCK_SAMPLES))
+      {
+        const TestBlock_t * block = &test->blocks[((size_t) (s / TEST_BLOCK_SAMPLES) * test->columnCount) + column];
+
+        if (block->minAt != TEST_BLOCK_NONE)
+        {
+          if (!any || (block->min < minValue))
+          {
+            minValue = block->min;
+            minAt    = block->minAt;
+          }
+
+          if (!any || (block->max > maxValue))
+          {
+            maxValue = block->max;
+            maxAt    = block->maxAt;
+          }
+
+          any = true;
+        }
+
+        s += TEST_BLOCK_SAMPLES;
+        continue;
+      }
+
       float value = test->values[((size_t) s * test->columnCount) + column];
+
+      s++;
 
       if (isnan(value))
       {
@@ -394,13 +485,13 @@ void testDataCurve(const TestData_t * test, uint32_t column, double startS, doub
       if (!any || (value < minValue))
       {
         minValue = value;
-        minAt = s;
+        minAt = s - 1;
       }
 
       if (!any || (value > maxValue))
       {
         maxValue = value;
-        maxAt = s;
+        maxAt = s - 1;
       }
 
       any = true;
@@ -687,6 +778,12 @@ static bool nameSame(const char * a, size_t aLen, const char * b, size_t bLen)
 
 // Splits line in place on the commas (the CSV export quotes the variable names, "" = a quote);
 // returns the number of fields
+// Block summaries for that many samples
+static size_t blockCount(uint32_t samples)
+{
+  return ((size_t) samples + TEST_BLOCK_SAMPLES - 1) / TEST_BLOCK_SAMPLES;
+}
+
 static uint32_t csvSplit(char * line, char ** fields, uint32_t max)
 {
   uint32_t count = 0;

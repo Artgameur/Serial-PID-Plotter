@@ -349,6 +349,187 @@ static void testCurve(void)
   testDataFree(test);
 }
 
+// testDataCurve as it was before the block summaries (reference for the exact-output tests)
+static void curveReference(const TestData_t * test, uint32_t column, double startS, double endS, uint32_t columns, float * output)
+{
+  double   startMs = startS * 1000.0;
+  double   stepMs  = ((endS - startS) * 1000.0) / columns;
+  uint32_t low     = 0;
+  uint32_t high    = test->sampleCount;
+
+  while (low < high)
+  {
+    uint32_t middle = low + ((high - low) / 2);
+
+    if ((double) test->times[middle] < startMs)
+    {
+      low = middle + 1;
+    }
+    else
+    {
+      high = middle;
+    }
+  }
+
+  uint32_t s = low;
+
+  for (uint32_t b = 0; b < columns; ++b)
+  {
+    double   binEnd = startMs + (stepMs * (b + 1));
+    bool     last   = (b + 1) == columns;
+    float    minValue = NAN;
+    float    maxValue = NAN;
+    uint32_t minAt = 0;
+    uint32_t maxAt = 0;
+    bool     any   = false;
+
+    for (; (s < test->sampleCount) && (last ? ((double) test->times[s] <= binEnd) : ((double) test->times[s] < binEnd)); ++s)
+    {
+      float value = test->values[((size_t) s * test->columnCount) + column];
+
+      if (isnan(value))
+      {
+        continue;
+      }
+
+      if (!any || (value < minValue))
+      {
+        minValue = value;
+        minAt = s;
+      }
+
+      if (!any || (value > maxValue))
+      {
+        maxValue = value;
+        maxAt = s;
+      }
+
+      any = true;
+    }
+
+    if (any)
+    {
+      output[2 * b]         = (minAt <= maxAt) ? minValue : maxValue;
+      output[(2 * b) + 1]   = (minAt <= maxAt) ? maxValue : minValue;
+      continue;
+    }
+
+    float value = NAN;
+
+    if ((s > 0) && (s < test->sampleCount))
+    {
+      float  before     = test->values[((size_t) (s - 1) * test->columnCount) + column];
+      float  after      = test->values[((size_t) s * test->columnCount) + column];
+      double beforeTime = test->times[s - 1];
+      double span       = (double) test->times[s] - beforeTime;
+      double position   = (span > 0.0) ? (((binEnd - (stepMs / 2.0)) - beforeTime) / span) : 0.0;
+
+      value = (float) (before + ((double) (after - before) * position));
+    }
+
+    output[2 * b]       = value;
+    output[(2 * b) + 1] = value;
+  }
+}
+
+static uint32_t rngState = 12345;
+
+static uint32_t rng(void)
+{
+  rngState = (rngState * 1103515245u) + 12345u;
+  return rngState >> 8;
+}
+
+// Value of sample s of a random test: NaN runs, ties (few levels), +0 / -0, spikes
+static float randomValue(uint32_t kind)
+{
+  uint32_t r = rng() % 100;
+
+  if (r < 8)
+  {
+    return NAN;
+  }
+
+  switch (kind)
+  {
+    case 0:  return (float) (rng() % 5);                        // many ties
+    case 1:  return (r < 50) ? 0.0f : -0.0f;                    // only zeros of both signs
+    case 2:  return ((float) (rng() % 100000) / 7.0f) - 5000.0f;
+    default: return (r < 2) ? 1e6f : (float) (rng() % 3) - 1.0f; // rare spikes
+  }
+}
+
+static void testCurveExact(void)
+{
+  static float expected[2 * 2000];
+  static float actual[2 * 2000];
+  const uint32_t sizes[] = {1, 2, 63, 64, 65, 127, 128, 1000, 4097, 200000};
+  uint32_t runs = 0;
+  uint32_t mismatches = 0;
+
+  for (uint32_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i)
+  {
+    for (uint32_t kind = 0; kind < 4; ++kind)
+    {
+      TestData_t * test = testDataCreate(3);
+      uint32_t     time = rng() % 1000;
+
+      for (uint32_t s = 0; s < sizes[i]; ++s)
+      {
+        float row[3] = {randomValue(kind), randomValue((kind + 1) % 4), (s % 50 < 25) ? NAN : randomValue(kind)};
+
+        // Steps of 0 (same time), 1 ms, or gaps
+        uint32_t r = rng() % 10;
+        time += (r < 2) ? 0 : ((r < 9) ? 1 : (rng() % 5000));
+        testDataAppend(test, time, row);
+      }
+
+      double total = (test->times[test->sampleCount - 1] + 1) / 1000.0;
+
+      for (uint32_t view = 0; view < 25; ++view)
+      {
+        // Whole test, zooms, partly or fully outside
+        double   start   = (view == 0) ? 0.0 : (((double) (rng() % 1400) / 1000.0) - 0.2) * total;
+        double   length  = (view == 0) ? total : (((double) (rng() % 1000) + 1.0) / 1000.0) * total * ((view % 5 == 0) ? 3.0 : 1.0);
+        uint32_t columns = (view % 3 == 0) ? 2000 : (1 + (rng() % 2000));
+
+        for (uint32_t c = 0; c < 3; ++c)
+        {
+          curveReference(test, c, start, start + length, columns, expected);
+          testDataCurve(test, c, start, start + length, columns, actual);
+          runs++;
+          mismatches += (memcmp(expected, actual, (size_t) columns * 2 * sizeof(float)) != 0) ? 1 : 0;
+        }
+      }
+
+      testDataFree(test);
+    }
+  }
+
+  // A test cleared to 0 samples and filled again (compare.c's wait data): summaries rebuilt
+  TestData_t * test = testDataCreate(1);
+
+  for (uint32_t pass = 0; pass < 2; ++pass)
+  {
+    test->sampleCount = 0;
+
+    for (uint32_t s = 0; s < 1000; ++s)
+    {
+      float row[1] = {(pass == 0) ? 100.0f : randomValue(2)};
+      testDataAppend(test, s, row);
+    }
+  }
+
+  curveReference(test, 0, 0.0, 1.0, 50, expected);
+  testDataCurve(test, 0, 0.0, 1.0, 50, actual);
+  runs++;
+  mismatches += (memcmp(expected, actual, 50 * 2 * sizeof(float)) != 0) ? 1 : 0;
+  testDataFree(test);
+
+  printf("  curve exact-output runs: %lu, mismatches: %lu\n", (unsigned long) runs, (unsigned long) mismatches);
+  CHECK(mismatches == 0);
+}
+
 // ================================================================================================
 //            Plateau
 // ================================================================================================
@@ -691,6 +872,98 @@ static void testSettingsAtExit(const char * exe)
 }
 
 // ================================================================================================
+//            Benchmark (--bench): large recordings, CSV, Compare curves
+// ================================================================================================
+
+static double benchMs(LARGE_INTEGER start)
+{
+  LARGE_INTEGER now;
+  LARGE_INTEGER frequency;
+
+  QueryPerformanceCounter(&now);
+  QueryPerformanceFrequency(&frequency);
+  return ((double) (now.QuadPart - start.QuadPart) * 1000.0) / (double) frequency.QuadPart;
+}
+
+static int bench(void)
+{
+  const uint32_t samples = 1000000;
+  const uint32_t columns = 8;
+  LARGE_INTEGER  start;
+  char           path[MAX_PATH];
+  float          row[TEST_COLUMNS_MAX];
+  static float   curve[2 * 2000];
+
+  TestData_t * test = testDataCreate(columns);
+
+  for (uint32_t c = 0; c < columns; ++c)
+  {
+    snprintf(test->headers[c], TEST_HEADER_LEN, "V%u", c);
+  }
+
+  // 1 M samples at 1 kHz (16 min 40 s), one value missing now and then
+  QueryPerformanceCounter(&start);
+  double appendMax = 0.0;
+
+  for (uint32_t s = 0; s < samples; ++s)
+  {
+    LARGE_INTEGER one;
+
+    for (uint32_t c = 0; c < columns; ++c)
+    {
+      row[c] = ((s % 997) == c) ? NAN : (float) (10.0 * sin((s * 0.001 * (c + 1)) + c) + c);
+    }
+
+    QueryPerformanceCounter(&one);
+    testDataAppend(test, s, row);
+    appendMax = fmax(appendMax, benchMs(one));
+  }
+
+  printf("append %u x %u: %.1f ms (longest single append %.2f ms)\n", samples, columns, benchMs(start), appendMax);
+
+  // Compare graph curves: whole test, 2000 pixel columns, each column (as graphRender for 8 curves)
+  for (int pass = 0; pass < 3; ++pass)
+  {
+    QueryPerformanceCounter(&start);
+
+    for (uint32_t c = 0; c < columns; ++c)
+    {
+      testDataCurve(test, c, 0.0, samples / 1000.0, 2000, curve);
+    }
+
+    printf("curves 8 x whole test (2000 columns): %.2f ms\n", benchMs(start));
+  }
+
+  QueryPerformanceCounter(&start);
+  for (uint32_t c = 0; c < columns; ++c)
+  {
+    testDataCurve(test, c, 500.0, 510.0, 2000, curve);
+  }
+  printf("curves 8 x 10 s zoom (2000 columns): %.2f ms\n", benchMs(start));
+
+  // CSV export and import
+  pathMake(path, sizeof(path), "bench.csv");
+  PlotExport_t * data = plotExportFromTest(test);
+
+  QueryPerformanceCounter(&start);
+  bool written = plotExportCliWrite(data, path);
+  printf("csv export %u rows: %.1f ms (%s)\n", samples, benchMs(start), written ? "ok" : "FAILED");
+  plotExportFree(data);
+
+  QueryPerformanceCounter(&start);
+  FILE *       file   = fopen(path, "rb");
+  TestData_t * loaded = testDataLoadCsv(file);
+  fclose(file);
+  printf("csv import %u rows: %.1f ms (%s)\n", samples, benchMs(start),
+         ((loaded != NULL) && (loaded->sampleCount == samples)) ? "ok" : "FAILED");
+
+  testDataFree(loaded);
+  testDataFree(test);
+  DeleteFileA(path);
+  return 0;
+}
+
+// ================================================================================================
 //            Main
 // ================================================================================================
 
@@ -717,10 +990,18 @@ int main(int argc, char ** argv)
 
   lv_init();
 
+  if ((argc == 2) && (strcmp(argv[1], "--bench") == 0))
+  {
+    int result = bench();
+    folderDelete(tempDir);
+    return result;
+  }
+
   testConditions();
   testCsvRoundTrip();
   testCsvMalformed();
   testCurve();
+  testCurveExact();
   testPlateau();
   testCommands();
   testLineParser();

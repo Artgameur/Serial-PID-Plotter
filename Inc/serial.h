@@ -82,16 +82,23 @@ typedef struct
   char description[SERIAL_PORT_DESC_LEN];
 } SerialPortInfo_t;
 
-// Receive queue of an open port (reader thread to LVGL thread), since it was opened
+// Receive queue of an open port (reader thread to LVGL thread), since it was opened. The app never
+// drops received data: with the queue full, the reader stops reading until there is room (the data
+// waits in the driver, which can then hold the sender back: see serial.c).
 typedef struct
 {
   uint64_t chunks;                        // queued
   uint64_t bytes;
-  uint64_t droppedChunks;                 // the queue was full: lost
-  uint64_t droppedBytes;
-  uint32_t queued;                        // chunks waiting now
-  uint32_t highWater;                     // most chunks waiting at once
-  uint32_t capacity;                      // chunks the queue holds
+  uint32_t queuedChunks;                  // waiting now
+  uint32_t queuedBytes;
+  uint32_t highWaterChunks;               // most waiting at once
+  uint32_t highWaterBytes;
+  uint32_t capacityChunks;
+  uint32_t capacityBytes;
+  uint32_t fullWaits;                     // times the queue was full: reading paused
+  uint32_t fullWaitMs;                    // how long in all
+  uint32_t driverOverruns;                // Windows lost received data before the app read it
+  uint32_t lineErrors;                    // framing / parity errors and breaks reported by Windows
 } SerialStats_t;
 
 // Owned by the caller; must stay alive while open (declare it static or global)

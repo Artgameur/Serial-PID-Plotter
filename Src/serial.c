@@ -8,6 +8,18 @@
    the LVGL thread. The port is opened in overlapped mode, so a send is not held by the waiting
    reader.
 
+   Lossless reception: the queue between the two threads holds RX_QUEUE_BYTES / RX_QUEUE_CHUNKS
+   (about a minute at 1000 lines per second, minutes at 115200 baud), so the LVGL thread can be
+   busy (a picture, a large graph) without losing anything. When it is still full, the reader does
+   not drop data: it stops reading until there is room. The data then waits in the driver; a sender
+   that honors flow control (RTS/CTS on a real UART, USB flow control on a VCOM device) is held
+   back, one that cannot wait loses data in the driver or in the device, which Windows may report
+   (driverOverruns). No buffer can be lossless if the sender cannot be paused and the app stays
+   slower than it for good: the queue only covers temporary stalls.
+
+   Each LVGL timer tick processes the waiting chunks for at most RX_POLL_BUDGET_MS, so a large
+   backlog is caught up over several frames instead of freezing one.
+
    @author artgameur
    @version 1.0
 */
@@ -30,8 +42,11 @@
 // ================================================================================================
 // ================================================================================================
 
-#define RX_CHUNKS             512         // chunks waiting for the LVGL timer (~2 s at 115200 baud
-                                          // in small chunks, more in large ones)
+#define RX_QUEUE_BYTES        (4u * 1024u * 1024u)   // received bytes waiting for the LVGL timer
+#define RX_QUEUE_CHUNKS       65536u      // reads waiting (a USB device: about a line each)
+#define RX_FULL_WAIT_MS       5           // queue full: the reader checks for room this often
+#define RX_POLL_BUDGET_MS     30          // processing per LVGL timer tick, at most
+#define RX_DRIVER_QUEUE       65536       // receive buffer asked of the driver (it may give less)
 #define STOP_TIMEOUT_MS       2000        // reader thread end at close
 #define READER_RECHECK_MS     100
 
@@ -41,9 +56,17 @@
 // ================================================================================================
 // ================================================================================================
 
+// A read: its bytes in the byte ring, whole (never split at its end)
 typedef struct
 {
+  uint32_t offset;
   uint32_t tick;                          // lv_tick_get() when received
+  uint16_t len;
+} RxRecord_t;
+
+typedef struct
+{
+  uint32_t tick;
   uint16_t len;
   uint8_t  data[SERIAL_RX_BUFFER_SIZE];
 } RxChunk_t;
@@ -58,10 +81,14 @@ typedef struct
   HANDLE           thread;
   HANDLE           stopEvent;
   CRITICAL_SECTION lock;
-  RxChunk_t        chunks[RX_CHUNKS];
-  uint32_t         head;                  // next written
-  uint32_t         tail;                  // next read
-  SerialStats_t    stats;                 // under lock
+  // Under lock. Its pages are only committed as they are used (large calloc).
+  uint8_t          bytes[RX_QUEUE_BYTES];
+  RxRecord_t       records[RX_QUEUE_CHUNKS];
+  uint32_t         recordHead;            // next written
+  uint32_t         recordTail;            // next read
+  uint32_t         byteHead;              // next written
+  uint32_t         byteTail;              // oldest waiting (= byteHead when empty)
+  SerialStats_t    stats;
   volatile LONG    lost;                  // the port failed (ex: USB unplugged)
   volatile LONG    owners;                // the open port, and the reader thread while it runs
   bool             sim;                   // simulated port (profiling builds only)
@@ -86,7 +113,9 @@ static const GUID portsClassGuid =
 static void              serialPollCb(lv_timer_t * tim);
 static void              serialHandleDisconnect(SerialPort_t * port);
 static unsigned __stdcall readerThread(void * arg);
-static void              chunkPush(SerialRx_t * rx, const uint8_t * data, uint32_t len, uint32_t tick);
+static bool              chunkPush(SerialRx_t * rx, const uint8_t * data, uint32_t len, uint32_t tick);
+static bool              chunkPushWait(SerialRx_t * rx, const uint8_t * data, uint32_t len, uint32_t tick);
+static bool              chunkPop(SerialRx_t * rx, RxChunk_t * chunk);
 static void              rxRelease(SerialRx_t * rx);
 static bool              portSetup(HANDLE h, const SerialConfig_t * config, DCB * dcbOut, COMMTIMEOUTS * timeoutsOut);
 #ifdef SD_PROFILE
@@ -209,7 +238,8 @@ bool serialOpen(SerialPort_t * port, const char * portName, const SerialConfig_t
   rx->port      = h;
   rx->owners    = 1;
   rx->sim       = sim;
-  rx->stats.capacity = RX_CHUNKS - 1;
+  rx->stats.capacityChunks = RX_QUEUE_CHUNKS - 1;
+  rx->stats.capacityBytes  = RX_QUEUE_BYTES;
   rx->stopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
 
   // Re-opening an already used struct closes the previous port first
@@ -247,6 +277,10 @@ static bool portSetup(HANDLE h, const SerialConfig_t * config, DCB * dcbOut, COM
 {
   DCB          dcb = *dcbOut;
   COMMTIMEOUTS timeouts = *timeoutsOut;
+
+  // A larger driver buffer holds more while the reader waits for room (a request: drivers may
+  // keep their own size)
+  SetupComm(h, RX_DRIVER_QUEUE, 4096);
 
   if (!GetCommState(h, &dcb))
   {
@@ -438,28 +472,19 @@ void serialFormatToString(const SerialConfig_t * config, char * buffer, uint32_t
 // port (after its last data)
 static void serialPollCb(lv_timer_t * tim)
 {
-  SerialPort_t * port = (SerialPort_t *) lv_timer_get_user_data(tim);
+  SerialPort_t * port  = (SerialPort_t *) lv_timer_get_user_data(tim);
+  uint32_t       start = lv_tick_get();
   RxChunk_t      chunk;
 
   // Taking the chunks out; the callbacks' own stages are timed apart
   PROF_PUSH(PROF_QUEUE);
 
-  while (serialIsOpen(port) && (port->rx != NULL))
+  // A backlog (the LVGL thread was busy) is caught up over several ticks: the rest stays queued
+  while (serialIsOpen(port) && (port->rx != NULL) && (lv_tick_elaps(start) < RX_POLL_BUDGET_MS))
   {
     SerialRx_t * rx = (SerialRx_t *) port->rx;
-    bool         any;
 
-    EnterCriticalSection(&rx->lock);
-    any = rx->tail != rx->head;
-    if (any)
-    {
-      chunk    = rx->chunks[rx->tail];
-      rx->tail = (rx->tail + 1) % RX_CHUNKS;
-      rx->stats.queued--;
-    }
-    LeaveCriticalSection(&rx->lock);
-
-    if (!any)
+    if (!chunkPop(rx, &chunk))
     {
       // Typically the USB VCOM device was unplugged
       if (rx->lost != 0)
@@ -491,6 +516,13 @@ static unsigned __stdcall readerThread(void * arg)
   waitOv.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
   readOv.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
 
+#ifdef SD_PROFILE
+  if (profReaderPriority())
+  {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+  }
+#endif
+
   while ((waitOv.hEvent != NULL) && (readOv.hEvent != NULL))
   {
     DWORD bytesRead = 0;
@@ -508,8 +540,27 @@ static unsigned __stdcall readerThread(void * arg)
 
     if (bytesRead > 0)
     {
-      chunkPush(rx, buffer, bytesRead, lv_tick_get());
+      DWORD   errors = 0;
+      COMSTAT status;
+
+      // Data lost or damaged before this read, as Windows tells (not all drivers do)
+      if (ClearCommError(h, &errors, &status) && (errors != 0))
+      {
+        EnterCriticalSection(&rx->lock);
+        rx->stats.driverOverruns += ((errors & (CE_RXOVER | CE_OVERRUN)) != 0) ? 1 : 0;
+        rx->stats.lineErrors     += ((errors & (CE_FRAME | CE_RXPARITY | CE_BREAK)) != 0) ? 1 : 0;
+        LeaveCriticalSection(&rx->lock);
+      }
+
+      bool queued = chunkPushWait(rx, buffer, bytesRead, lv_tick_get());
+
       PROF_END_THREAD(PROF_ACQ, acqStart);
+
+      if (!queued)
+      {
+        break;
+      }
+
       continue;
     }
 
@@ -587,34 +638,112 @@ static void rxRelease(SerialRx_t * rx)
   free(rx);
 }
 
-// Full (the LVGL thread stalled for seconds): the chunk is dropped (counted in the stats)
-static void chunkPush(SerialRx_t * rx, const uint8_t * data, uint32_t len, uint32_t tick)
+// Queues a read (len <= SERIAL_RX_BUFFER_SIZE); false when there is no room (nothing queued)
+static bool chunkPush(SerialRx_t * rx, const uint8_t * data, uint32_t len, uint32_t tick)
 {
+  uint32_t offset;
+  bool     room;
+
   EnterCriticalSection(&rx->lock);
 
-  uint32_t next = (rx->head + 1) % RX_CHUNKS;
+  bool empty = rx->recordHead == rx->recordTail;
 
-  if (next != rx->tail)
+  if (empty)
   {
-    RxChunk_t * chunk = &rx->chunks[rx->head];
+    rx->byteHead = 0;
+    rx->byteTail = 0;
+  }
 
-    chunk->tick = tick;
-    chunk->len  = (uint16_t) len;
-    memcpy(chunk->data, data, len);
-    rx->head = next;
-
-    rx->stats.chunks++;
-    rx->stats.bytes += len;
-    rx->stats.queued++;
-    rx->stats.highWater = LV_MAX(rx->stats.highWater, rx->stats.queued);
+  // Bytes: after the newest, or from the start of the ring when the end is too short. Never up to
+  // the oldest exactly (head == tail means empty).
+  if (rx->byteHead >= rx->byteTail)
+  {
+    room   = ((RX_QUEUE_BYTES - rx->byteHead) >= len) || (rx->byteTail > len);
+    offset = ((RX_QUEUE_BYTES - rx->byteHead) >= len) ? rx->byteHead : 0;
   }
   else
   {
-    rx->stats.droppedChunks++;
-    rx->stats.droppedBytes += len;
+    room   = (rx->byteTail - rx->byteHead) > len;
+    offset = rx->byteHead;
+  }
+
+  room = room && (((rx->recordHead + 1) % RX_QUEUE_CHUNKS) != rx->recordTail);
+
+  if (room)
+  {
+    RxRecord_t * record = &rx->records[rx->recordHead];
+
+    memcpy(&rx->bytes[offset], data, len);
+    *record = (RxRecord_t) {offset, tick, (uint16_t) len};
+    rx->recordHead = (rx->recordHead + 1) % RX_QUEUE_CHUNKS;
+    rx->byteHead   = offset + len;
+
+    // Ring wasted at the end when the read went to the start: counted as used until read
+    rx->stats.chunks++;
+    rx->stats.bytes += len;
+    rx->stats.queuedChunks++;
+    rx->stats.queuedBytes += len;
+    rx->stats.highWaterChunks = LV_MAX(rx->stats.highWaterChunks, rx->stats.queuedChunks);
+    PROF_DO(profQueueDepth(rx->stats.queuedChunks);)
+    rx->stats.highWaterBytes  = LV_MAX(rx->stats.highWaterBytes, rx->stats.queuedBytes);
   }
 
   LeaveCriticalSection(&rx->lock);
+  return room;
+}
+
+// Queue full: waits for room instead of dropping the data (the reader pauses; see the file
+// comment). false: the port is being closed (the data is then not needed).
+static bool chunkPushWait(SerialRx_t * rx, const uint8_t * data, uint32_t len, uint32_t tick)
+{
+  if (chunkPush(rx, data, len, tick))
+  {
+    return true;
+  }
+
+  uint32_t start = lv_tick_get();
+  bool     queued = false;
+
+  EnterCriticalSection(&rx->lock);
+  rx->stats.fullWaits++;
+  LeaveCriticalSection(&rx->lock);
+
+  while (!queued && (WaitForSingleObject(rx->stopEvent, RX_FULL_WAIT_MS) == WAIT_TIMEOUT))
+  {
+    // Keeps its arrival time: when the bytes came, not when there was room
+    queued = chunkPush(rx, data, len, tick);
+  }
+
+  EnterCriticalSection(&rx->lock);
+  rx->stats.fullWaitMs += lv_tick_elaps(start);
+  LeaveCriticalSection(&rx->lock);
+  PROF_DO(profQueueWait(lv_tick_elaps(start));)
+  return queued;
+}
+
+// Oldest read waiting; false when none
+static bool chunkPop(SerialRx_t * rx, RxChunk_t * chunk)
+{
+  EnterCriticalSection(&rx->lock);
+
+  bool any = rx->recordTail != rx->recordHead;
+
+  if (any)
+  {
+    const RxRecord_t * record = &rx->records[rx->recordTail];
+
+    chunk->tick = record->tick;
+    chunk->len  = record->len;
+    memcpy(chunk->data, &rx->bytes[record->offset], record->len);
+
+    rx->recordTail = (rx->recordTail + 1) % RX_QUEUE_CHUNKS;
+    rx->byteTail   = (rx->recordTail != rx->recordHead) ? rx->records[rx->recordTail].offset : rx->byteHead;
+    rx->stats.queuedChunks--;
+    rx->stats.queuedBytes -= record->len;
+  }
+
+  LeaveCriticalSection(&rx->lock);
+  return any;
 }
 
 #ifdef SD_PROFILE
@@ -637,6 +766,11 @@ static unsigned __stdcall simThread(void * arg)
   if (timer == NULL)
   {
     timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+  }
+
+  if (profReaderPriority())
+  {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
   }
 
   QueryPerformanceFrequency(&frequency);
@@ -663,6 +797,8 @@ static unsigned __stdcall simThread(void * arg)
     for (uint32_t n = 0; (sent < target) && (n < rate); ++n, ++sent)
     {
       PROF_START(acqStart);
+      // Stamped this late after the line was due (the thread waited for a core)
+      profStampDelay((uint64_t) acqStart - (uint64_t) start.QuadPart - (uint64_t) (((double) sent * frequency.QuadPart) / rate));
       double t   = (double) sent / rate;
       int    len = snprintf(line, sizeof(line), "%lu", (unsigned long) (sent % 1000000));
 
@@ -672,10 +808,17 @@ static unsigned __stdcall simThread(void * arg)
       }
 
       line[len++] = '\n';
-      chunkPush(rx, (const uint8_t *) line, (uint32_t) len, lv_tick_get());
-      PROF_END_THREAD(PROF_ACQ, acqStart);
-    }
 
+      // As a sender that can be held back (flow control): it waits while the queue is full
+      bool queued = chunkPushWait(rx, (const uint8_t *) line, (uint32_t) len, lv_tick_get());
+
+      PROF_END_THREAD(PROF_ACQ, acqStart);
+
+      if (!queued)
+      {
+        break;
+      }
+    }
   }
 
   if (timer != NULL)

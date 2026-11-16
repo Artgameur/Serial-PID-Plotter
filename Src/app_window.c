@@ -13,6 +13,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 #include <windowsx.h>
@@ -22,6 +23,8 @@
 #include <shellapi.h>
 
 #include "lvgl.h"
+#include "src/drivers/windows/lv_windows_context.h"
+#include "profile.h"
 
 // ================================================================================================
 // ================================================================================================
@@ -182,12 +185,88 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 // ================================================================================================
 // ================================================================================================
 
+// The driver's flush copies the whole window after each frame (StretchBlt, HALFTONE). With the UI
+// drawn 1:1, only the redrawn areas are copied instead (BitBlt from the driver's frame buffer).
+// The window's content is kept by the desktop compositor between frames; the driver redraws all of
+// it after a resize. Other zoom / simulator mode: the driver's own flush.
+static lv_display_flush_cb_t driverFlush;
+
+static void flushAreas(lv_display_t * display, const lv_area_t * area, uint8_t * pixels)
+{
+  HWND                          hwnd    = lv_windows_get_display_window_handle(display);
+  lv_windows_window_context_t * context = (hwnd != NULL) ? lv_windows_get_window_context(hwnd) : NULL;
+  bool                          whole   = (context == NULL) || (context->zoom_level != 100) || context->simulator_mode;
+
+  PROF_PUSH(PROF_FLUSH);
+
+#ifdef SD_PROFILE
+  // Measurement of the former way
+  whole = whole || (getenv("SD_FLUSH_FULL") != NULL);
+#endif
+
+  if (whole)
+  {
+    driverFlush(display, area, pixels);
+    PROF_POP();
+    return;
+  }
+
+  HDC hdc = GetDC(hwnd);
+
+  if (hdc != NULL)
+  {
+    BitBlt(hdc, area->x1, area->y1, lv_area_get_width(area), lv_area_get_height(area),
+           context->display_framebuffer_context_handle, area->x1, area->y1, SRCCOPY);
+    ReleaseDC(hwnd, hdc);
+  }
+
+  lv_display_flush_ready(display);
+  PROF_POP();
+}
+
+// Main loop: Sleep() wakes on the system timer step (~15.6 ms by default), so the LVGL timers ran
+// late (16 ms periods every 15.6 or 31.2 ms, ~40 frames per second at most). A high resolution
+// waitable timer wakes when asked (Windows 10 1803+; otherwise Sleep()).
+void appWindowWait(uint32_t ms)
+{
+  static HANDLE timer;
+  static bool   tried;
+
+  if (ms == 0)
+  {
+    return;
+  }
+
+  if (!tried)
+  {
+    tried = true;
+    timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+  }
+
+  LARGE_INTEGER due = {.QuadPart = -(LONGLONG) ms * 10000};   // 100 ns units, relative
+
+  if ((timer != NULL) && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
+  {
+    WaitForSingleObject(timer, INFINITE);
+  }
+  else
+  {
+    Sleep(ms);
+  }
+}
+
 void appWindowInit(lv_display_t * display, int32_t minWidth, int32_t minHeight)
 {
   appDisplay  = display;
   minUiWidth  = minWidth;
   minUiHeight = minHeight;
   appHwnd     = lv_windows_get_display_window_handle(display);
+  driverFlush = lv_display_get_flush_cb(display);
+
+  if (driverFlush != NULL)
+  {
+    lv_display_set_flush_cb(display, flushAreas);
+  }
 
   if (appHwnd != NULL)
   {

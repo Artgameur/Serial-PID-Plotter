@@ -126,7 +126,6 @@ static void          listPrint(void);
 static const char *  variableResolve(const char * name);
 static void          graphAdd(char * list);
 static void          graphsResolve(void);
-static uint32_t      tickGet(void);
 static void          uiStart(void);
 static void          picturePrint(const char * path);
 static void          pictureMake(const char * path, const char * format, const char * width, const char * ppi);
@@ -632,10 +631,6 @@ static void graphsResolve(void)
   }
 }
 
-static uint32_t tickGet(void)
-{
-  return GetTickCount();
-}
 
 // A display without a window, with the light theme, holding the Compare tab
 static void uiStart(void)
@@ -643,7 +638,7 @@ static void uiStart(void)
   static uint8_t buffer[CLI_DISPLAY_WIDTH * CLI_BUFFER_LINES * CLI_BYTES_PER_PIXEL];
 
   lv_init();
-  lv_tick_set_cb(tickGet);
+  lv_tick_set_cb(cliTickGet);
 
   lv_display_t * display = lv_display_create(CLI_DISPLAY_WIDTH, CLI_DISPLAY_HEIGHT);
 
