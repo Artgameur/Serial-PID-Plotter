@@ -1,6 +1,6 @@
 # Serial Dashboard
 
-Windows desktop app (C, LVGL) for devices that send numbers over a serial / USB VCOM port:
+Windows desktop app (C, LVGL; macOS / Linux versions not tested yet) for devices that send numbers over a serial / USB VCOM port:
 
 - **Serial** tab: up to 4 connections at once, terminal (text / hex / decimal), auto reconnect.
 - **Plot** tab: live plots of the received values (up to 8 plot windows, 32 variables), zoom,
@@ -66,10 +66,46 @@ spent per stage (serial acquisition, queue, parsing, recording, chart preparatio
 rendering...), CPU, memory and per-port counters to a CSV file. It can also simulate serial ports.
 The environment variables are listed in `Inc/profile.h`.
 
+## macOS and Linux (not tested)
+
+The app also builds there, with SDL2 for the window (LVGL's SDL driver). **Not tested yet:**
+on Linux it was only built and run in WSL (Ubuntu): the tests pass and the window opens, but it
+has not been used on a Linux desktop or with a serial device. macOS has never been built: expect
+fixes on the first build.
+
+```sh
+# macOS (Homebrew)
+brew install cmake sdl2 python
+# Debian / Ubuntu
+sudo apt install build-essential cmake python3 libsdl2-dev
+
+git clone --recurse-submodules <repo> && cd "Serial Dashboard"
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target serial_dashboard serial_dashboard_tests -j
+./build/serial_dashboard_tests
+./build/serial_dashboard
+```
+
+- Serial ports: macOS `/dev/cu.*`, Linux `/dev/ttyUSB*`, `ttyACM*`, `ttyAMA*` and real `ttyS*`.
+  On Linux the user must be allowed to open them (group `dialout` or `uucp`).
+- File and folder dialogs: macOS `osascript`, Linux `zenity` (or `kdialog`); notifications:
+  `osascript`, `notify-send`.
+- Settings: `~/Library/Application Support/SerialDashboard` (macOS), `~/.config/SerialDashboard`
+  (Linux).
+- Not on macOS / Linux yet: the profiling build (`SD_PROFILE`), the command line tool (`agent/`),
+  the window icon in the theme's colors, the title bar colors, non-standard baud rates on Linux,
+  1.5 stop bits, mark / space parity on macOS.
+
+## License
+
+MIT (see `LICENSE`): free to use, modify and publish, as long as the copyright notice is kept.
+LVGL (`lvgl/`) has its own MIT license.
+
 ## Source layout
 
 - `main.c`: window and LVGL setup, main loop.
 - `sources.cmake`: the engine's source list, shared by the app and by `agent/`.
-- `Src/`, `Inc/`: the engine (one `.c` / `.h` pair per module). System calls go through
-  `platform.h` (`platform_win.c`); the window is `app_window.c`, the serial ports `serial_win.c`
-  with `serial_common.c` (receive queue).
+- `Src/`, `Inc/`: the engine (one `.c` / `.h` pair per module). What differs between the systems:
+  `platform.h` (`platform_win.c` / `platform_posix.c`), the window (`app_window.c` Windows,
+  `app_window_sdl.c` macOS / Linux) and the serial ports (`serial_win.c` / `serial_posix.c`, both
+  with `serial_common.c`).
