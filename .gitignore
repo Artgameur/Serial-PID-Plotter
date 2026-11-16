@@ -25,6 +25,7 @@ agent/dist/
 CMakeUserPresets.json
 
 # Editor / OS
+.vscode/
 .vs/
 *.swp
 Thumbs.db
