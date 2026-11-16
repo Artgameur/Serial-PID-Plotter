@@ -5,17 +5,35 @@
           cmake-build); exit code 0 when all pass.
 */
 // ------------------------------------------------------------------------------------------------
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <process.h>
 #include <windows.h>
+#else
+#include <time.h>
+#include <unistd.h>
+#endif
 
 #include "lvgl.h"
 #include "line_parser.h"
+#include "platform.h"
 #include "plot_export.h"
 #include "settings.h"
 #include "test_data.h"
+
+#define TEST_PATH_LEN         PLATFORM_PATH_LEN
+
+// Line end of a text file written by the app (fopen "w")
+#ifdef _WIN32
+#define TEXT_NL               "\r\n"
+#else
+#define TEXT_NL               "\n"
+#endif
 
 static int checks;
 static int failures;
@@ -31,7 +49,92 @@ static int failures;
     }                                                                                 \
   } while (0)
 
-static char tempDir[MAX_PATH];
+static char tempDir[TEST_PATH_LEN];
+
+// ================================================================================================
+//            What differs between the systems
+// ================================================================================================
+
+static double nowMs(void)
+{
+#ifdef _WIN32
+  LARGE_INTEGER now;
+  LARGE_INTEGER frequency;
+
+  QueryPerformanceCounter(&now);
+  QueryPerformanceFrequency(&frequency);
+  return ((double) now.QuadPart * 1000.0) / (double) frequency.QuadPart;
+#else
+  struct timespec now;
+
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return ((double) now.tv_sec * 1000.0) + ((double) now.tv_nsec / 1e6);
+#endif
+}
+
+// The settings folder of the app (platformConfigDir) moved under dir: the user's is not touched
+static void configHomeSet(const char * dir)
+{
+#ifdef _WIN32
+  SetEnvironmentVariableA("APPDATA", dir);
+  _putenv_s("APPDATA", dir);
+#elif defined(__APPLE__)
+  setenv("HOME", dir, 1);
+#else
+  setenv("XDG_CONFIG_HOME", dir, 1);
+#endif
+}
+
+// <settings folder>/SerialDashboard/<name>
+static void settingsPathGet(char * path, size_t size, const char * name)
+{
+  char base[TEST_PATH_LEN];
+
+  platformConfigDir(base, sizeof(base));
+  snprintf(path, size, "%s" PLATFORM_PATH_SEP_STR "SerialDashboard" PLATFORM_PATH_SEP_STR "%s", base, name);
+}
+
+static void dirRemove(const char * path)
+{
+#ifdef _WIN32
+  RemoveDirectoryA(path);
+#else
+  rmdir(path);
+#endif
+}
+
+static void folderDelete(const char * dir)
+{
+  char command[TEST_PATH_LEN + 32];
+
+#ifdef _WIN32
+  snprintf(command, sizeof(command), "rmdir /s /q \"%s\" 2>nul", dir);
+#else
+  snprintf(command, sizeof(command), "rm -rf '%s'", dir);
+#endif
+
+  if (system(command) != 0)
+  {
+    // Left for the system's temporary files cleanup
+  }
+}
+
+static void tempDirMake(void)
+{
+#ifdef _WIN32
+  char base[TEST_PATH_LEN];
+
+  GetTempPathA(sizeof(base), base);
+  snprintf(tempDir, sizeof(tempDir), "%sserial_dashboard_tests_%lu", base, (unsigned long) GetCurrentProcessId());
+#else
+  const char * base = getenv("TMPDIR");
+
+  snprintf(tempDir, sizeof(tempDir), "%s/serial_dashboard_tests_%lu", ((base != NULL) && (base[0] != '\0')) ? base : "/tmp",
+           (unsigned long) getpid());
+#endif
+
+  platformMakeDirs(tempDir);
+}
 
 // ================================================================================================
 //            Helpers
@@ -84,7 +187,7 @@ static bool sameFloat(float a, float b)
 
 static void pathMake(char * path, size_t size, const char * name)
 {
-  snprintf(path, size, "%s\\%s", tempDir, name);
+  snprintf(path, size, "%s" PLATFORM_PATH_SEP_STR "%s", tempDir, name);
 }
 
 static void fileWriteText(const char * path, const char * text)
@@ -96,7 +199,7 @@ static void fileWriteText(const char * path, const char * text)
 
 static TestData_t * csvLoadText(const char * text)
 {
-  char path[MAX_PATH];
+  char path[TEST_PATH_LEN];
 
   pathMake(path, sizeof(path), "input.csv");
   fileWriteText(path, text);
@@ -126,7 +229,7 @@ static bool fileContains(const char * path, const char * text)
 
 static bool fileExists(const char * path)
 {
-  return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+  return platformFileExists(path);
 }
 
 // ================================================================================================
@@ -237,7 +340,7 @@ static void testCsvRoundTrip(void)
   const float  temp[]  = {1.5f, NAN, -3.25f, 1234567.0f, 0.000123f};
   const float  power[] = {0.0f, 2.0f, NAN, -0.5f, 1e-7f};
   TestData_t * test    = testMake(temp, power, 5);
-  char         path[MAX_PATH];
+  char         path[TEST_PATH_LEN];
 
   // A name with a comma and quotes, settings and commands
   snprintf(test->headers[1], TEST_HEADER_LEN, "Power, \"net\" [W]");
@@ -785,22 +888,20 @@ static void testLineParser(void)
 
 static void testSettings(void)
 {
-  char file[MAX_PATH];
-  char temp[MAX_PATH];
+  char file[TEST_PATH_LEN];
+  char temp[TEST_PATH_LEN];
 
-  pathMake(file, sizeof(file), "SerialDashboard\\settings.ini");
-  pathMake(temp, sizeof(temp), "SerialDashboard\\settings.ini.tmp");
-
-  // In the test folder, not the user's (settingsInit reads APPDATA)
-  SetEnvironmentVariableA("APPDATA", tempDir);
-  _putenv_s("APPDATA", tempDir);
+  // In the test folder, not the user's
+  configHomeSet(tempDir);
+  settingsPathGet(file, sizeof(file), "settings.ini");
+  settingsPathGet(temp, sizeof(temp), "settings.ini.tmp");
   settingsInit();
 
   settingsSetString("alpha", "1");
   settingsSetInt("beta", -42);
   settingsFlush();
-  // Text mode: lines end with \r\n
-  CHECK(fileContains(file, "alpha=1\r\n") && fileContains(file, "beta=-42\r\n"));
+  // Text mode: lines end with \r\n on Windows
+  CHECK(fileContains(file, "alpha=1" TEXT_NL) && fileContains(file, "beta=-42" TEXT_NL));
   CHECK(!fileExists(temp));
   CHECK(settingsGetInt("beta", 0) == -42);
   CHECK(settingsGetInt("alpha", 7) == 1);
@@ -810,27 +911,27 @@ static void testSettings(void)
 
   // The file cannot be replaced (a folder in its place): the change stays to be saved, the file
   // left untouched, no temporary file left
-  DeleteFileA(file);
-  CreateDirectoryA(file, NULL);
+  platformRemove(file);
+  platformMakeDirs(file);
   settingsSetString("gamma", "3");
   settingsFlush();
   CHECK(!fileExists(temp));
-  RemoveDirectoryA(file);
+  dirRemove(file);
   CHECK(!fileExists(file));
   settingsFlush();                              // tried again: written now
-  CHECK(fileContains(file, "gamma=3\r\n") && fileContains(file, "alpha=1\r\n"));
+  CHECK(fileContains(file, "gamma=3" TEXT_NL) && fileContains(file, "alpha=1" TEXT_NL));
 
   // Profiles: saved without the app settings, loaded back
-  char profile[MAX_PATH];
-  pathMake(profile, sizeof(profile), "SerialDashboard\\profiles\\Test profile.ini");
+  char profile[TEST_PATH_LEN];
+  settingsPathGet(profile, sizeof(profile), "profiles" PLATFORM_PATH_SEP_STR "Test profile.ini");
   settingsSetString("language", "1");
   CHECK(settingsProfileSave("Test profile"));
-  CHECK(fileContains(profile, "gamma=3\r\n") && !fileContains(profile, "language="));
+  CHECK(fileContains(profile, "gamma=3" TEXT_NL) && !fileContains(profile, "language="));
   settingsSetString("gamma", "changed");
   CHECK(settingsProfileLoad("Test profile"));
   CHECK(strcmp(settingsGetString("gamma", ""), "3") == 0);
   CHECK(strcmp(settingsGetString("language", ""), "1") == 0);
-  CHECK(fileContains(file, "gamma=3\r\n"));    // settings.ini written at once
+  CHECK(fileContains(file, "gamma=3" TEXT_NL));    // settings.ini written at once
   CHECK(!settingsProfileSave("..\\escape"));
   CHECK(!settingsProfileNameValid("bad/name") && !settingsProfileNameValid(" lead") && settingsProfileNameValid("ok-1_2.3"));
 
@@ -844,13 +945,13 @@ static void testSettings(void)
   CHECK(settingsGetInt("k1000", -1) == 1000);   // 7 + 1001 < 1024
   CHECK(settingsGetInt("k1099", -1) == -1);
   settingsFlush();
-  CHECK(fileContains(file, "k1000=1000\r\n"));
+  CHECK(fileContains(file, "k1000=1000" TEXT_NL));
 }
 
 // Child process: a change, then exit() as when the window is closed (LVGL's Windows driver)
 static int settingsExitChild(const char * dir)
 {
-  _putenv_s("APPDATA", dir);
+  configHomeSet(dir);
   lv_init();
   settingsInit();
   settingsSetString("written", "at exit");
@@ -859,38 +960,39 @@ static int settingsExitChild(const char * dir)
 
 static void testSettingsAtExit(const char * exe)
 {
-  char dir[MAX_PATH];
-  char file[MAX_PATH];
-  char command[MAX_PATH * 3];
+  char dir[TEST_PATH_LEN];
+  char file[TEST_PATH_LEN];
+  char command[TEST_PATH_LEN * 3];
 
   pathMake(dir, sizeof(dir), "exit");
-  CreateDirectoryA(dir, NULL);
-  snprintf(file, sizeof(file), "%s\\SerialDashboard\\settings.ini", dir);
+  platformMakeDirs(dir);
+  configHomeSet(dir);
+  settingsPathGet(file, sizeof(file), "settings.ini");
+  configHomeSet(tempDir);
+#ifdef _WIN32
   snprintf(command, sizeof(command), "\"\"%s\" --settings-exit-child \"%s\"\"", exe, dir);
+#else
+  snprintf(command, sizeof(command), "'%s' --settings-exit-child '%s'", exe, dir);
+#endif
   CHECK(system(command) == 0);
-  CHECK(fileContains(file, "written=at exit\r\n"));
+  CHECK(fileContains(file, "written=at exit" TEXT_NL));
 }
 
 // ================================================================================================
 //            Benchmark (--bench): large recordings, CSV, Compare curves
 // ================================================================================================
 
-static double benchMs(LARGE_INTEGER start)
+static double benchMs(double start)
 {
-  LARGE_INTEGER now;
-  LARGE_INTEGER frequency;
-
-  QueryPerformanceCounter(&now);
-  QueryPerformanceFrequency(&frequency);
-  return ((double) (now.QuadPart - start.QuadPart) * 1000.0) / (double) frequency.QuadPart;
+  return nowMs() - start;
 }
 
 static int bench(void)
 {
   const uint32_t samples = 1000000;
   const uint32_t columns = 8;
-  LARGE_INTEGER  start;
-  char           path[MAX_PATH];
+  double         start;
+  char           path[TEST_PATH_LEN];
   float          row[TEST_COLUMNS_MAX];
   static float   curve[2 * 2000];
 
@@ -902,19 +1004,19 @@ static int bench(void)
   }
 
   // 1 M samples at 1 kHz (16 min 40 s), one value missing now and then
-  QueryPerformanceCounter(&start);
+  start = nowMs();
   double appendMax = 0.0;
 
   for (uint32_t s = 0; s < samples; ++s)
   {
-    LARGE_INTEGER one;
+    double one;
 
     for (uint32_t c = 0; c < columns; ++c)
     {
       row[c] = ((s % 997) == c) ? NAN : (float) (10.0 * sin((s * 0.001 * (c + 1)) + c) + c);
     }
 
-    QueryPerformanceCounter(&one);
+    one = nowMs();
     testDataAppend(test, s, row);
     appendMax = fmax(appendMax, benchMs(one));
   }
@@ -924,7 +1026,7 @@ static int bench(void)
   // Compare graph curves: whole test, 2000 pixel columns, each column (as graphRender for 8 curves)
   for (int pass = 0; pass < 3; ++pass)
   {
-    QueryPerformanceCounter(&start);
+    start = nowMs();
 
     for (uint32_t c = 0; c < columns; ++c)
     {
@@ -934,7 +1036,7 @@ static int bench(void)
     printf("curves 8 x whole test (2000 columns): %.2f ms\n", benchMs(start));
   }
 
-  QueryPerformanceCounter(&start);
+  start = nowMs();
   for (uint32_t c = 0; c < columns; ++c)
   {
     testDataCurve(test, c, 500.0, 510.0, 2000, curve);
@@ -945,12 +1047,12 @@ static int bench(void)
   pathMake(path, sizeof(path), "bench.csv");
   PlotExport_t * data = plotExportFromTest(test);
 
-  QueryPerformanceCounter(&start);
+  start = nowMs();
   bool written = plotExportCliWrite(data, path);
   printf("csv export %u rows: %.1f ms (%s)\n", samples, benchMs(start), written ? "ok" : "FAILED");
   plotExportFree(data);
 
-  QueryPerformanceCounter(&start);
+  start = nowMs();
   FILE *       file   = fopen(path, "rb");
   TestData_t * loaded = testDataLoadCsv(file);
   fclose(file);
@@ -959,21 +1061,13 @@ static int bench(void)
 
   testDataFree(loaded);
   testDataFree(test);
-  DeleteFileA(path);
+  platformRemove(path);
   return 0;
 }
 
 // ================================================================================================
 //            Main
 // ================================================================================================
-
-static void folderDelete(const char * dir)
-{
-  char command[MAX_PATH + 32];
-
-  snprintf(command, sizeof(command), "rmdir /s /q \"%s\" 2>nul", dir);
-  system(command);
-}
 
 int main(int argc, char ** argv)
 {
@@ -982,11 +1076,7 @@ int main(int argc, char ** argv)
     return settingsExitChild(argv[2]);
   }
 
-  char base[MAX_PATH];
-
-  GetTempPathA(sizeof(base), base);
-  snprintf(tempDir, sizeof(tempDir), "%sserial_dashboard_tests_%lu", base, (unsigned long) GetCurrentProcessId());
-  CreateDirectoryA(tempDir, NULL);
+  tempDirMake();
 
   lv_init();
 

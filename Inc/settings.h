@@ -56,11 +56,11 @@ typedef enum
   SETTINGS_FILE_LAYOUT,                   // the plots' layout only (see settings.c)
 } SettingsFileKind_t;
 
-bool settingsFileExport(const wchar_t * path, SettingsFileKind_t kind);
+bool settingsFileExport(const char * path, SettingsFileKind_t kind);
 
 // A setup replaces the project settings, a layout only the plots' layout. settings.ini is written
 // now; the screens show it after a restart. false: not such a file (nothing changed).
-bool settingsFileImport(const wchar_t * path, SettingsFileKind_t * kind);
+bool settingsFileImport(const char * path, SettingsFileKind_t * kind);
 
 // Profiles: copies of the project settings (port, format, variables, plots, commands, ...) in
 // %APPDATA%\SerialDashboard\profiles\<name>.ini. The app settings (scale, frame rate, colors)

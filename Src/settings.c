@@ -13,9 +13,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <io.h>
-#include <windows.h>
 
+#include "platform.h"
 #include "profile.h"
 
 // ================================================================================================
@@ -27,7 +26,7 @@
 #define SETTINGS_MAX          1024        // 32 variables x 7 settings, 8 plots x 10, commands, ... (~450 used)
 #define SETTINGS_KEY_LEN      32
 #define SETTINGS_VALUE_LEN    192         // room for a command with its values (cmd_panel.c)
-#define SETTINGS_PATH_LEN     MAX_PATH
+#define SETTINGS_PATH_LEN     PLATFORM_PATH_LEN
 #define SETTINGS_DIR_NAME     "SerialDashboard"
 #define SETTINGS_FILE_NAME    "settings.ini"
 #define SETTINGS_PROFILE_DIR  "profiles"
@@ -74,7 +73,16 @@ static const char * const appKeys[] = {"language", "uiScale", "maxFps", "theme",
 // ================================================================================================
 // ================================================================================================
 
+// Profile names found by settingsProfileList
+typedef struct
+{
+  char (*names)[SETTINGS_PROFILE_NAME_LEN];
+  uint32_t max;
+  uint32_t count;
+} ProfileList_t;
+
 static void              pathInit(void);
+static void              profileListAdd(const char * name, void * context);
 static void              fileLoad(const char * path);
 static bool              fileSave(const char * path, bool appSettings);
 static bool              fileWrite(const char * path, bool appSettings);
@@ -157,51 +165,11 @@ bool settingsProfileNameValid(const char * name)
 // Profile names in alphabetical order (file names in profiles\ without the extension)
 uint32_t settingsProfileList(char names[][SETTINGS_PROFILE_NAME_LEN], uint32_t max)
 {
-  char             pattern[SETTINGS_PATH_LEN];
-  WIN32_FIND_DATAA found;
-  uint32_t         count = 0;
+  ProfileList_t list = {names, max, 0};
 
-  snprintf(pattern, sizeof(pattern), "%s\\*%s", profileDir, SETTINGS_PROFILE_EXT);
-  HANDLE find = FindFirstFileA(pattern, &found);
-
-  if (find == INVALID_HANDLE_VALUE)
-  {
-    return 0;
-  }
-
-  do
-  {
-    size_t len = strlen(found.cFileName) - strlen(SETTINGS_PROFILE_EXT);
-
-    if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (len == 0) || (len >= SETTINGS_PROFILE_NAME_LEN))
-    {
-      continue;
-    }
-
-    // Insertion sort, case insensitive
-    char name[SETTINGS_PROFILE_NAME_LEN];
-    snprintf(name, sizeof(name), "%.*s", (int) len, found.cFileName);
-
-    uint32_t i = count;
-    while ((i > 0) && (_stricmp(names[i - 1], name) > 0))
-    {
-      if (i < max)
-      {
-        memcpy(names[i], names[i - 1], SETTINGS_PROFILE_NAME_LEN);
-      }
-      --i;
-    }
-
-    if (i < max)
-    {
-      memcpy(names[i], name, SETTINGS_PROFILE_NAME_LEN);
-      count = LV_MIN(count + 1, max);
-    }
-  }
-  while (FindNextFileA(find, &found));
-
-  FindClose(find);
-  return count;
+  // Extension without its dot
+  platformListFiles(profileDir, SETTINGS_PROFILE_EXT + 1, profileListAdd, &list);
+  return list.count;
 }
 
 // The project settings (everything except the app settings) are written to profiles\<name>.ini
@@ -225,7 +193,7 @@ bool settingsProfileLoad(const char * name)
   char     path[SETTINGS_PATH_LEN];
   uint32_t kept = 0;
 
-  if (!profilePath(name, path, sizeof(path)) || (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES))
+  if (!profilePath(name, path, sizeof(path)) || !platformFileExists(path))
   {
     return false;
   }
@@ -245,9 +213,9 @@ bool settingsProfileLoad(const char * name)
   return !dirty;
 }
 
-bool settingsFileExport(const wchar_t * path, SettingsFileKind_t kind)
+bool settingsFileExport(const char * path, SettingsFileKind_t kind)
 {
-  FILE * file = _wfopen(path, L"w");
+  FILE * file = platformFopen(path, "w");
 
   if (file == NULL)
   {
@@ -270,9 +238,9 @@ bool settingsFileExport(const wchar_t * path, SettingsFileKind_t kind)
   return fclose(file) == 0;
 }
 
-bool settingsFileImport(const wchar_t * path, SettingsFileKind_t * kind)
+bool settingsFileImport(const char * path, SettingsFileKind_t * kind)
 {
-  FILE *   file = _wfopen(path, L"r");
+  FILE *   file = platformFopen(path, "r");
   char     text[SETTINGS_KEY_LEN + SETTINGS_VALUE_LEN + 4];
   uint32_t kept = 0;
   bool     found = false;
@@ -351,7 +319,7 @@ bool settingsProfileDelete(const char * name)
 {
   char path[SETTINGS_PATH_LEN];
 
-  if (!profilePath(name, path, sizeof(path)) || !DeleteFileA(path))
+  if (!profilePath(name, path, sizeof(path)) || !platformRemove(path))
   {
     return false;
   }
@@ -508,8 +476,8 @@ bool settingsCliApply(const char * key, const char * value, bool * live, char * 
     }
     else
     {
-      bool on  = (strcmp(value, "1") == 0) || (_stricmp(value, "on") == 0) || (_stricmp(value, "true") == 0);
-      bool off = (strcmp(value, "0") == 0) || (_stricmp(value, "off") == 0) || (_stricmp(value, "false") == 0);
+      bool on  = (strcmp(value, "1") == 0) || (platformStrcasecmp(value, "on") == 0) || (platformStrcasecmp(value, "true") == 0);
+      bool off = (strcmp(value, "0") == 0) || (platformStrcasecmp(value, "off") == 0) || (platformStrcasecmp(value, "false") == 0);
 
       if (!on && !off)
       {
@@ -539,18 +507,19 @@ bool settingsCliApply(const char * key, const char * value, bool * live, char * 
 // ================================================================================================
 // ================================================================================================
 
-// %APPDATA%\SerialDashboard\settings.ini, or next to the program when APPDATA is not set
+// <settings folder>/SerialDashboard/settings.ini (Windows: %APPDATA%, macOS: ~/Library/Application
+// Support, Linux: ~/.config), or next to the program when that folder is not known
 static void pathInit(void)
 {
-  const char * appData = getenv("APPDATA");
+  char base[SETTINGS_PATH_LEN];
 
-  if ((appData != NULL) && (appData[0] != '\0'))
+  if (platformConfigDir(base, sizeof(base)))
   {
     char dir[SETTINGS_PATH_LEN];
-    snprintf(dir, sizeof(dir), "%s\\%s", appData, SETTINGS_DIR_NAME);
-    CreateDirectoryA(dir, NULL);
-    snprintf(filePath, sizeof(filePath), "%s\\%s", dir, SETTINGS_FILE_NAME);
-    snprintf(profileDir, sizeof(profileDir), "%s\\%s", dir, SETTINGS_PROFILE_DIR);
+    snprintf(dir, sizeof(dir), "%s" PLATFORM_PATH_SEP_STR "%s", base, SETTINGS_DIR_NAME);
+    platformMakeDirs(dir);
+    snprintf(filePath, sizeof(filePath), "%s" PLATFORM_PATH_SEP_STR "%s", dir, SETTINGS_FILE_NAME);
+    snprintf(profileDir, sizeof(profileDir), "%s" PLATFORM_PATH_SEP_STR "%s", dir, SETTINGS_PROFILE_DIR);
   }
   else
   {
@@ -558,12 +527,41 @@ static void pathInit(void)
     snprintf(profileDir, sizeof(profileDir), "%s", SETTINGS_PROFILE_DIR);
   }
 
-  CreateDirectoryA(profileDir, NULL);
+  platformMakeDirs(profileDir);
+}
+
+// platformListFiles: one profile name, put in its place (insertion sort, case insensitive)
+static void profileListAdd(const char * name, void * context)
+{
+  ProfileList_t * list = context;
+  size_t          len  = strlen(name);
+
+  if ((len == 0) || (len >= SETTINGS_PROFILE_NAME_LEN))
+  {
+    return;
+  }
+
+  uint32_t i = list->count;
+
+  while ((i > 0) && (platformStrcasecmp(list->names[i - 1], name) > 0))
+  {
+    if (i < list->max)
+    {
+      memcpy(list->names[i], list->names[i - 1], SETTINGS_PROFILE_NAME_LEN);
+    }
+    --i;
+  }
+
+  if (i < list->max)
+  {
+    snprintf(list->names[i], SETTINGS_PROFILE_NAME_LEN, "%s", name);
+    list->count = LV_MIN(list->count + 1, list->max);
+  }
 }
 
 static void fileLoad(const char * path)
 {
-  FILE * file = fopen(path, "r");
+  FILE * file = platformFopen(path, "r");
   char   text[SETTINGS_KEY_LEN + SETTINGS_VALUE_LEN + 4];
 
   if (file == NULL)
@@ -608,7 +606,7 @@ static bool fileWrite(const char * path, bool appSettings)
     return false;
   }
 
-  file = fopen(temp, "w");
+  file = platformFopen(temp, "w");
 
   if (file == NULL)
   {
@@ -624,14 +622,14 @@ static bool fileWrite(const char * path, bool appSettings)
   }
 
   // On the disk before it replaces the file
-  bool ok = (fflush(file) == 0) && (_commit(_fileno(file)) == 0) && !ferror(file);
+  bool ok = platformFileSync(file) && !ferror(file);
 
   ok = (fclose(file) == 0) && ok;
-  ok = ok && MoveFileExA(temp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+  ok = ok && platformReplaceFile(temp, path);
 
   if (!ok)
   {
-    DeleteFileA(temp);
+    platformRemove(temp);
   }
 
   return ok;
@@ -703,7 +701,7 @@ static bool profilePath(const char * name, char * path, size_t size)
     return false;
   }
 
-  snprintf(path, size, "%s\\%s%s", profileDir, name, SETTINGS_PROFILE_EXT);
+  snprintf(path, size, "%s" PLATFORM_PATH_SEP_STR "%s%s", profileDir, name, SETTINGS_PROFILE_EXT);
   return true;
 }
 

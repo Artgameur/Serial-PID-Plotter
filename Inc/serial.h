@@ -21,7 +21,7 @@
 // ================================================================================================
 // ================================================================================================
 
-#define SERIAL_PORT_NAME_LEN    16
+#define SERIAL_PORT_NAME_LEN    64          // macOS: "cu.usbmodem14201", Linux: "ttyACM0"
 #define SERIAL_PORT_DESC_LEN    128
 #define SERIAL_MAX_PORTS        32
 #define SERIAL_RX_BUFFER_SIZE   256
@@ -84,7 +84,7 @@ typedef struct
 
 // Receive queue of an open port (reader thread to LVGL thread), since it was opened. The app never
 // drops received data: with the queue full, the reader stops reading until there is room (the data
-// waits in the driver, which can then hold the sender back: see serial.c).
+// waits in the driver, which can then hold the sender back: see serial_common.h).
 typedef struct
 {
   uint64_t chunks;                        // queued
@@ -105,7 +105,7 @@ typedef struct
 struct SerialPort
 {
   void *               handle;
-  void *               rx;                // reader thread and received chunks (serial.c)
+  void *               rx;                // reader thread and received chunks (serial_win.c / serial_posix.c)
   char                 name[SERIAL_PORT_NAME_LEN];
   SerialConfig_t       config;
   lv_timer_t *         pollTimer;

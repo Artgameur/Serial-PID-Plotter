@@ -13,16 +13,14 @@
 #include "plot_export.h"
 
 #include <math.h>
-#include <process.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
-#include <commdlg.h>
 
 #include "lvgl.h"
-#include "app_window.h"
 #include "lang.h"
+#include "platform.h"
 
 // ================================================================================================
 // ================================================================================================
@@ -30,9 +28,7 @@
 // ================================================================================================
 // ================================================================================================
 
-#define EXPORT_PATH_LEN       MAX_PATH
-#define FILETIME_PER_MS       10000ULL    // FILETIME: 100 ns units
-#define UNIX_TO_FILETIME_MS   11644473600000LL
+#define EXPORT_PATH_LEN       PLATFORM_PATH_LEN
 
 // ================================================================================================
 // ================================================================================================
@@ -41,12 +37,11 @@
 // ================================================================================================
 
 // Written by the export thread, read by the LVGL thread once the state is DONE
-static volatile LONG  exportState = PLOT_EXPORT_IDLE;
+static atomic_int     exportState = PLOT_EXPORT_IDLE;
 static char           exportMessage[PLOT_EXPORT_MESSAGE_LEN];
 static PlotExport_t * exportData;
-static wchar_t        exportPath[EXPORT_PATH_LEN];   // UTF-16: any folder / file name
-static HWND           exportOwner;
-static volatile LONG  saveFailures;
+static char           exportPath[EXPORT_PATH_LEN];   // UTF-8
+static atomic_uint    saveFailures;
 
 // ================================================================================================
 // ================================================================================================
@@ -58,12 +53,12 @@ static volatile LONG  saveFailures;
 typedef struct
 {
   PlotExport_t * data;
-  wchar_t        path[EXPORT_PATH_LEN * 2];
+  char           path[EXPORT_PATH_LEN];
 } SaveJob_t;
 
-static unsigned __stdcall exportThread(void * arg);
-static unsigned __stdcall saveThread(void * arg);
-static bool               fileWrite(const PlotExport_t * data, const wchar_t * path);
+static void exportThread(void * arg);
+static void saveThread(void * arg);
+static bool fileWrite(const PlotExport_t * data, const char * path);
 static void               quotedWrite(const char * text, FILE * file);
 
 // ================================================================================================
@@ -92,10 +87,8 @@ PlotExport_t * plotExportAlloc(uint32_t sampleCount, uint32_t varCount)
     return NULL;
   }
 
-  FILETIME now;
-  GetSystemTimeAsFileTime(&now);
-  data->endFileTime = ((uint64_t) now.dwHighDateTime << 32) | now.dwLowDateTime;
-  data->endTick     = lv_tick_get();
+  data->endUnixMs = platformUnixMs();
+  data->endTick   = lv_tick_get();
   return data;
 }
 
@@ -127,7 +120,7 @@ PlotExport_t * plotExportFromTest(const TestData_t * test)
 
   if (test->startMs != 0)
   {
-    data->endFileTime = (uint64_t) (test->startMs + lastMs + UNIX_TO_FILETIME_MS) * FILETIME_PER_MS;
+    data->endUnixMs = test->startMs + lastMs;
   }
 
   memcpy(data->headers, test->headers, sizeof(test->headers));
@@ -142,7 +135,7 @@ bool plotExportSaveTo(PlotExport_t * data, const char * path)
 {
   SaveJob_t * job = malloc(sizeof(SaveJob_t));
 
-  if ((job == NULL) || (MultiByteToWideChar(CP_UTF8, 0, path, -1, job->path, sizeof(job->path) / sizeof(job->path[0])) == 0))
+  if ((job == NULL) || ((size_t) snprintf(job->path, sizeof(job->path), "%s", path) >= sizeof(job->path)))
   {
     free(job);
     plotExportFree(data);
@@ -151,66 +144,59 @@ bool plotExportSaveTo(PlotExport_t * data, const char * path)
 
   job->data = data;
 
-  uintptr_t thread = _beginthreadex(NULL, 0, saveThread, job, 0, NULL);
-
-  if (thread == 0)
+  if (!platformThreadStart(saveThread, job))
   {
     plotExportFree(data);
     free(job);
     return false;
   }
 
-  CloseHandle((HANDLE) thread);
   return true;
 }
 
 uint32_t plotExportSaveFailures(void)
 {
-  return (uint32_t) InterlockedExchange(&saveFailures, 0);
+  return atomic_exchange(&saveFailures, 0);
 }
 
 bool plotExportStart(PlotExport_t * data)
 {
-  SYSTEMTIME local;
-  char       name[64];
+  PlatformTime_t local;
+  int            idle = PLOT_EXPORT_IDLE;
 
-  if (InterlockedCompareExchange(&exportState, PLOT_EXPORT_BUSY, PLOT_EXPORT_IDLE) != PLOT_EXPORT_IDLE)
+  if (!atomic_compare_exchange_strong(&exportState, &idle, PLOT_EXPORT_BUSY))
   {
     plotExportFree(data);
     return false;
   }
 
   exportData = data;
-  GetLocalTime(&local);
-  snprintf(name, sizeof(name), "plot_%04u-%02u-%02u_%02u%02u%02u.csv", local.wYear, local.wMonth, local.wDay,
-           local.wHour, local.wMinute, local.wSecond);
-  MultiByteToWideChar(CP_UTF8, 0, name, -1, exportPath, EXPORT_PATH_LEN);
-  // The dialog is modal to the app's window
-  exportOwner = (HWND) lv_windows_get_display_window_handle(lv_display_get_default());
+  platformLocalTime(platformUnixMs(), &local);
+  snprintf(exportPath, sizeof(exportPath), "plot_%04d-%02d-%02d_%02d%02d%02d.csv", local.year, local.month, local.day,
+           local.hour, local.minute, local.second);
 
-  uintptr_t thread = _beginthreadex(NULL, 0, exportThread, NULL, 0, NULL);
-
-  if (thread == 0)
+  if (!platformThreadStart(exportThread, NULL))
   {
     exportData = NULL;
     plotExportFree(data);
-    InterlockedExchange(&exportState, PLOT_EXPORT_IDLE);
+    atomic_store(&exportState, PLOT_EXPORT_IDLE);
     return false;
   }
 
-  CloseHandle((HANDLE) thread);
   return true;
 }
 
 PlotExportState_t plotExportPoll(char * message, uint32_t size)
 {
-  if (InterlockedCompareExchange(&exportState, PLOT_EXPORT_DONE, PLOT_EXPORT_DONE) != PLOT_EXPORT_DONE)
+  int state = atomic_load(&exportState);
+
+  if (state != PLOT_EXPORT_DONE)
   {
-    return (PlotExportState_t) exportState;
+    return (PlotExportState_t) state;
   }
 
   snprintf(message, size, "%s", exportMessage);
-  InterlockedExchange(&exportState, PLOT_EXPORT_IDLE);
+  atomic_store(&exportState, PLOT_EXPORT_IDLE);
   return PLOT_EXPORT_DONE;
 }
 
@@ -223,38 +209,31 @@ PlotExportState_t plotExportPoll(char * message, uint32_t size)
 #ifdef SERIAL_DASHBOARD_CLI
 bool plotExportCliWrite(const PlotExport_t * data, const char * path)
 {
-  wchar_t widePath[MAX_PATH * 2];
-
-  return (MultiByteToWideChar(CP_UTF8, 0, path, -1, widePath, sizeof(widePath) / sizeof(widePath[0])) != 0) &&
-         fileWrite(data, widePath);
+  return fileWrite(data, path);
 }
 #endif
 
-static unsigned __stdcall saveThread(void * arg)
+static void saveThread(void * arg)
 {
   SaveJob_t * job = arg;
 
   if (!fileWrite(job->data, job->path))
   {
-    InterlockedIncrement(&saveFailures);
+    atomic_fetch_add(&saveFailures, 1);
   }
 
   plotExportFree(job->data);
   free(job);
-  return 0;
 }
 
-static unsigned __stdcall exportThread(void * arg)
+static void exportThread(void * arg)
 {
   LV_UNUSED(arg);
 
-  char path[EXPORT_PATH_LEN * 3];          // UTF-8 (LVGL text)
-  // exportPath: default file name in, chosen path out. "\0" separated pairs: not a single text
-  // for tr().
-  bool chosen = appWindowFileDialog(exportOwner, true, tr("Export plot data"),
-                                    (langGet() == LANG_FR) ? L"Fichier CSV (*.csv)\0*.csv\0Tous les fichiers (*.*)\0*.*\0"
-                                                           : L"CSV file (*.csv)\0*.csv\0All files (*.*)\0*.*\0",
-                                    L"csv", exportPath, EXPORT_PATH_LEN, OFN_OVERWRITEPROMPT);
+  // exportPath: default file name in, chosen path out
+  PlatformFilter_t filter = {tr("CSV file"), "csv", tr("All files")};
+  bool             chosen = platformSaveDialog(tr("Export plot data"), &filter, exportPath, sizeof(exportPath));
+  const char *     path   = exportPath;
 
   if (!chosen)
   {
@@ -263,8 +242,6 @@ static unsigned __stdcall exportThread(void * arg)
   }
   else
   {
-    WideCharToMultiByte(CP_UTF8, 0, exportPath, -1, path, sizeof(path), NULL, NULL);
-
     if (fileWrite(exportData, exportPath))
     {
       snprintf(exportMessage, sizeof(exportMessage), tr("Exported %lu samples to %s"),
@@ -278,13 +255,12 @@ static unsigned __stdcall exportThread(void * arg)
 
   plotExportFree(exportData);
   exportData = NULL;
-  InterlockedExchange(&exportState, PLOT_EXPORT_DONE);
-  return 0;
+  atomic_store(&exportState, PLOT_EXPORT_DONE);
 }
 
-static bool fileWrite(const PlotExport_t * data, const wchar_t * path)
+static bool fileWrite(const PlotExport_t * data, const char * path)
 {
-  FILE * file = _wfopen(path, L"wb");
+  FILE * file = platformFopen(path, "wb");
 
   if (file == NULL)
   {
@@ -307,20 +283,13 @@ static bool fileWrite(const PlotExport_t * data, const wchar_t * path)
   for (uint32_t s = 0; s < data->sampleCount; ++s)
   {
     // Wall clock of the sample: the copy's time minus the sample's age
-    uint32_t       age  = data->endTick - data->ticks[s];
-    ULARGE_INTEGER time = {.QuadPart = data->endFileTime - ((uint64_t) age * FILETIME_PER_MS)};
-    FILETIME       utc  = {time.LowPart, time.HighPart};
-    SYSTEMTIME     utcTime;
-    SYSTEMTIME     local;
+    uint32_t       age = data->endTick - data->ticks[s];
+    PlatformTime_t local;
 
-    FileTimeToSystemTime(&utc, &utcTime);
-    if (!SystemTimeToTzSpecificLocalTime(NULL, &utcTime, &local))
-    {
-      local = utcTime;
-    }
+    platformLocalTime(data->endUnixMs - (int64_t) age, &local);
 
-    fprintf(file, "%llu,%04u-%02u-%02u %02u:%02u:%02u.%03u,%.3f", (unsigned long long) (data->firstSample + s),
-            local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond, local.wMilliseconds,
+    fprintf(file, "%llu,%04d-%02d-%02d %02d:%02d:%02d.%03d,%.3f", (unsigned long long) (data->firstSample + s),
+            local.year, local.month, local.day, local.hour, local.minute, local.second, local.ms,
             (double) (data->ticks[s] - data->ticks[0]) / 1000.0);
 
     const float * row = &data->values[(size_t) s * data->varCount];

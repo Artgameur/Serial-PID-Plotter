@@ -38,8 +38,8 @@ typedef struct
   uint32_t   varCount;
   uint32_t   sampleCount;
   uint64_t   firstSample;                 // number of the first sample (since the app started)
-  uint32_t   endTick;                     // lv_tick_get() and wall clock (FILETIME, UTC) when
-  uint64_t   endFileTime;                 // the copy was taken: give each sample's date and time
+  uint32_t   endTick;                     // lv_tick_get() and wall clock (Unix ms, UTC) when
+  int64_t    endUnixMs;                   // the copy was taken: give each sample's date and time
   char       headers[PLOTTER_MAX_VARS][PLOT_EXPORT_HEADER_LEN];
   char       settings[TEST_SETTINGS_LEN]; // device settings: last rows of the file (empty: none)
   char       commands[TEST_COMMANDS_LEN]; // commands sent

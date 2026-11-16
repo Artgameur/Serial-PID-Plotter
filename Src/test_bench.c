@@ -18,19 +18,17 @@
 #include "test_bench.h"
 
 #include <math.h>
-#include <process.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <windows.h>
-#include <objbase.h>
-#include <shlobj.h>
 
 #include "src/libs/lodepng/lodepng.h"
 
 #include "app_window.h"
 #include "lang.h"
+#include "platform.h"
 #include "plot_export.h"
 #include "plotter.h"
 #include "profile.h"
@@ -43,12 +41,12 @@
 // ================================================================================================
 // ================================================================================================
 
-#define BENCH_FOLDER_LEN      (MAX_PATH * 3)         // UTF-8
+#define BENCH_FOLDER_LEN      PLATFORM_PATH_LEN      // UTF-8
 #define BENCH_NAME_LEN        (TEST_NAME_LEN + 24)   // "<date>_<time>_<name>"
 #define BENCH_PATH_LEN        (BENCH_FOLDER_LEN + BENCH_NAME_LEN + 8)
 #define BENCH_MESSAGE_LEN     (BENCH_PATH_LEN + 64)
 #define BENCH_POLL_MS         500                    // background results checked this often
-#define BENCH_DEFAULT_FOLDER  "\\Documents\\Serial Dashboard"
+#define BENCH_DEFAULT_FOLDER  "Serial Dashboard"     // in the user's documents
 #define BENCH_BYTES_RGB       3
 #define BENCH_BYTES_ARGB      4
 #define BENCH_PICTURE_SCREEN  0           // order of pictureOptions
@@ -98,16 +96,15 @@ static lv_obj_t * sizeLabel;
 static const char * pictureOptions = "As on screen\nReport";
 
 // Folder dialog, in its own thread. Written by the thread, read once browseDone is set.
-static HWND          browseOwner;
-static wchar_t       browsePath[MAX_PATH];
-static volatile LONG browseDone;
+static char          browsePath[BENCH_FOLDER_LEN];
+static atomic_bool   browseDone;
 static bool          browseChosen;
 
 // Picture encoded and written in its own thread. The snapshot is taken and destroyed on the LVGL
 // thread (pollTimer); the thread only reads its pixels.
 typedef struct
 {
-  volatile LONG   state;                  // PICTURE_xxx
+  atomic_int      state;                  // PICTURE_xxx
   lv_draw_buf_t * snapshot;
   lv_color_t      background;
   bool            reported;
@@ -129,7 +126,7 @@ static bool baseNameGet(const char * name, char * base, uint32_t size);
 static void pathGet(const char * base, const char * extension, char * path, uint32_t size);
 static bool pictureSave(lv_obj_t * obj, const char * path, bool savedMessage, bool wait);
 static bool pictureEncode(const lv_draw_buf_t * snapshot, lv_color_t background, bool reported, int32_t ppi, const char * path);
-static unsigned __stdcall pictureThread(void * arg);
+static void pictureThread(void * arg);
 static void pictureJobsCheck(void);
 
 static lv_obj_t * reportInputCreate(lv_obj_t * row, lv_group_t * group, const char * key, const char * fallback, const char * accepted);
@@ -139,7 +136,7 @@ static void pictureSizeGet(BenchPicture_t * picture);
 static void pollTimer(lv_timer_t * tim);
 static void browseEvent(lv_event_t * e);
 static void pictureEvent(lv_event_t * e);
-static unsigned __stdcall browseThread(void * arg);
+static void browseThread(void * arg);
 
 // ================================================================================================
 // ================================================================================================
@@ -153,7 +150,7 @@ void benchBoxCreate(lv_obj_t * parent, lv_group_t * group)
   lv_obj_t * header;
   lv_obj_t * box  = uiBoxCreate(parent, tr("Test bench"), &header);
   lv_obj_t * row  = uiSettingRowCreate(box, tr("Auto save"));
-  const char * home = getenv("USERPROFILE");
+  char       documents[BENCH_FOLDER_LEN];
 
   // Saves the tests that end, CSV and picture
   autoSwitch = lv_switch_create(row);
@@ -169,7 +166,8 @@ void benchBoxCreate(lv_obj_t * parent, lv_group_t * group)
   row = uiSettingRowCreate(box, tr("Folder"));
   folderInput = uiTextareaCreate(row, tr("Folder"));
   lv_textarea_set_max_length(folderInput, BENCH_FOLDER_LEN - 1);
-  snprintf(folder, sizeof(folder), "%s%s", (home != NULL) ? home : "C:", BENCH_DEFAULT_FOLDER);
+  platformDocumentsDir(documents, sizeof(documents));
+  snprintf(folder, sizeof(folder), "%s" PLATFORM_PATH_SEP_STR "%s", documents, BENCH_DEFAULT_FOLDER);
   lv_textarea_set_text(folderInput, folder);
   settingsBindTextarea(folderInput, "benchFolder");
   lv_group_add_obj(group, folderInput);
@@ -368,7 +366,6 @@ static void pictureSizeGet(BenchPicture_t * picture)
 // "<date>_<time>_<name>", the folder created when needed; false when it cannot be
 static bool baseNameGet(const char * name, char * base, uint32_t size)
 {
-  wchar_t   folder[MAX_PATH];
   time_t    now   = time(NULL);
   struct tm local = *localtime(&now);
   size_t    used  = strftime(base, size, "%Y%m%d_%H%M%S_", &local);
@@ -383,19 +380,12 @@ static bool baseNameGet(const char * name, char * base, uint32_t size)
     }
   }
 
-  if (MultiByteToWideChar(CP_UTF8, 0, lv_textarea_get_text(folderInput), -1, folder, MAX_PATH) == 0)
-  {
-    return false;
-  }
-
-  int result = SHCreateDirectoryExW(NULL, folder, NULL);
-
-  return (result == ERROR_SUCCESS) || (result == ERROR_ALREADY_EXISTS) || (result == ERROR_FILE_EXISTS);
+  return platformMakeDirs(lv_textarea_get_text(folderInput));
 }
 
 static void pathGet(const char * base, const char * extension, char * path, uint32_t size)
 {
-  snprintf(path, size, "%s\\%s.%s", lv_textarea_get_text(folderInput), base, extension);
+  snprintf(path, size, "%s" PLATFORM_PATH_SEP_STR "%s.%s", lv_textarea_get_text(folderInput), base, extension);
 }
 
 // The snapshot is taken here (LVGL thread); the conversion, PNG encoding and file writing are done
@@ -437,18 +427,15 @@ static bool pictureSave(lv_obj_t * obj, const char * path, bool savedMessage, bo
     job->savedMessage = savedMessage;
     job->ok           = false;
     snprintf(job->path, sizeof(job->path), "%s", path);
-    job->state        = PICTURE_BUSY;
+    atomic_store(&job->state, PICTURE_BUSY);
 
-    uintptr_t thread = _beginthreadex(NULL, 0, pictureThread, job, 0, NULL);
-
-    if (thread != 0)
+    if (platformThreadStart(pictureThread, job))
     {
-      CloseHandle((HANDLE) thread);
       PROF_POP();
       return true;
     }
 
-    job->state = PICTURE_FREE;
+    atomic_store(&job->state, PICTURE_FREE);
     break;
   }
 
@@ -459,13 +446,12 @@ static bool pictureSave(lv_obj_t * obj, const char * path, bool savedMessage, bo
   return ok;
 }
 
-static unsigned __stdcall pictureThread(void * arg)
+static void pictureThread(void * arg)
 {
   PictureJob_t * job = arg;
 
   job->ok = pictureEncode(job->snapshot, job->background, job->reported, job->ppi, job->path);
-  InterlockedExchange(&job->state, PICTURE_DONE);
-  return 0;
+  atomic_store(&job->state, PICTURE_DONE);
 }
 
 // LVGL thread: pictures done in the background (snapshot destroyed, result told)
@@ -477,7 +463,7 @@ static void pictureJobsCheck(void)
   {
     PictureJob_t * job = &pictureJobs[j];
 
-    if (InterlockedCompareExchange(&job->state, PICTURE_DONE, PICTURE_DONE) != PICTURE_DONE)
+    if (atomic_load(&job->state) != PICTURE_DONE)
     {
       continue;
     }
@@ -491,7 +477,7 @@ static void pictureJobsCheck(void)
       plotterToast(message);
     }
 
-    InterlockedExchange(&job->state, PICTURE_FREE);
+    atomic_store(&job->state, PICTURE_FREE);
   }
 }
 
@@ -547,13 +533,7 @@ static bool pictureEncode(const lv_draw_buf_t * snapshot, lv_color_t background,
 
     if (encodeError == 0)
     {
-      wchar_t widePath[MAX_PATH * 2];
-      FILE *  file = NULL;
-
-      if (MultiByteToWideChar(CP_UTF8, 0, path, -1, widePath, sizeof(widePath) / sizeof(widePath[0])) != 0)
-      {
-        file = _wfopen(widePath, L"wb");
-      }
+      FILE * file = platformFopen(path, "wb");
 
       if (file != NULL)
       {
@@ -582,16 +562,13 @@ static void pollTimer(lv_timer_t * tim)
     plotterToast(tr("Could not write a CSV file of the test bench."));
   }
 
-  if (InterlockedExchange(&browseDone, 0) != 0)
+  if (atomic_exchange(&browseDone, false))
   {
     lv_obj_set_state(browseBtn, LV_STATE_DISABLED, false);
 
     if (browseChosen)
     {
-      char folder[BENCH_FOLDER_LEN];
-
-      WideCharToMultiByte(CP_UTF8, 0, browsePath, -1, folder, sizeof(folder), NULL, NULL);
-      lv_textarea_set_text(folderInput, folder);
+      lv_textarea_set_text(folderInput, browsePath);
     }
   }
 }
@@ -629,41 +606,19 @@ static void browseEvent(lv_event_t * e)
 {
   LV_UNUSED(e);
 
-  browseOwner = (HWND) lv_windows_get_display_window_handle(lv_display_get_default());
+  // The folder now: where the dialog starts (on macOS and Linux)
+  snprintf(browsePath, sizeof(browsePath), "%s", lv_textarea_get_text(folderInput));
 
-  uintptr_t thread = _beginthreadex(NULL, 0, browseThread, NULL, 0, NULL);
-
-  if (thread != 0)
+  if (platformThreadStart(browseThread, NULL))
   {
-    CloseHandle((HANDLE) thread);
     lv_obj_set_state(browseBtn, LV_STATE_DISABLED, true);
   }
 }
 
-static unsigned __stdcall browseThread(void * arg)
+static void browseThread(void * arg)
 {
   LV_UNUSED(arg);
 
-  HRESULT     com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-  wchar_t     title[64];
-  BROWSEINFOW info = {0};
-
-  MultiByteToWideChar(CP_UTF8, 0, tr("Folder of the test bench"), -1, title, sizeof(title) / sizeof(title[0]));
-
-  info.hwndOwner = browseOwner;
-  info.lpszTitle = title;
-  info.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-
-  LPITEMIDLIST list = SHBrowseForFolderW(&info);
-
-  browseChosen = (list != NULL) && SHGetPathFromIDListW(list, browsePath);
-  CoTaskMemFree(list);
-
-  if (SUCCEEDED(com))
-  {
-    CoUninitialize();
-  }
-
-  InterlockedExchange(&browseDone, 1);
-  return 0;
+  browseChosen = platformFolderDialog(tr("Folder of the test bench"), browsePath, sizeof(browsePath));
+  atomic_store(&browseDone, true);
 }

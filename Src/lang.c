@@ -41,6 +41,8 @@ static const Translation_t translations[] =
   {"Serial", "Série"},
   {"Plot", "Graphique"},
   {"Settings", "Paramètres"},
+  {"All files", "Tous les fichiers"},
+  {"CSV file", "Fichier CSV"},
   {"File", "Fichier"},
   {"Whole setup\nPlot layout", "Configuration complète\nDisposition des graphiques"},
   {"Whole setup: as a profile (port, variables, plots, commands, tests). Plot layout: the plots, their windows and which variables they show.", "Configuration complète : comme un profil (port, variables, graphiques, commandes, essais). Disposition des graphiques : les graphiques, leurs fenêtres et les variables qu'ils affichent."},

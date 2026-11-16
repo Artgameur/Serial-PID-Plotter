@@ -87,7 +87,7 @@ void profInit(lv_display_t * display);
 void profScenarioStart(lv_obj_t * tabview);
 void profLoop(uint64_t handlerStart);
 
-// Simulated ports (serial.c)
+// Simulated ports (serial_win.c)
 uint32_t profSimPorts(void);
 uint32_t profSimRate(void);
 uint32_t profSimValues(void);

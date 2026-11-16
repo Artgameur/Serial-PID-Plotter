@@ -106,6 +106,11 @@ lv_obj_t * uiOverlayCreate(lv_obj_t * parent, const char * title, lv_event_cb_t 
 // Visible scrollbar for a container whose styles were removed (lv_obj_remove_style_all)
 void uiScrollbarShow(lv_obj_t * obj);
 
+// Mouse wheel at point (UI coordinates): scrolls the nearest scrollable container under it that
+// has hidden content in the wheel direction (ex: settings windows, terminal log). delta: 120 per
+// notch, positive away from the user (as Windows' WM_MOUSEWHEEL).
+void uiWheelScroll(lv_point_t point, int32_t delta);
+
 // The PC keyboard types in the text boxes of group (NULL: nowhere)
 void uiKeypadGroupSet(lv_group_t * group);
 

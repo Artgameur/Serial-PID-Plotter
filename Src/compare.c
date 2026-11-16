@@ -51,17 +51,15 @@
 #include "compare.h"
 
 #include <math.h>
-#include <process.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <wchar.h>
-#include <windows.h>
-#include <commdlg.h>
 
 #include "app_window.h"
 #include "lang.h"
+#include "platform.h"
 #include "plot_export.h"
 #include "plotter.h"
 #include "profile.h"
@@ -125,9 +123,8 @@
 #define STOP_CUSTOM           1
 #define NUMBER_NOT_SET        -1
 
-#define OPEN_PATHS_LEN        32768       // file names of a multiple selection (UTF-16)
 #define OPEN_POLL_MS          200
-#define OPEN_NAME_LEN         (MAX_PATH * 3)
+#define OPEN_NAME_LEN         PLATFORM_PATH_LEN
 
 // The settled condition, in the custom conditions' language
 #define CONDITION_SETTLED     "held(abs(watch-ref)<=band,N)"
@@ -334,9 +331,7 @@ static lv_group_t * group;
 
 // Open dialog, in its own thread (the UI and the recording keep running). Written by the thread,
 // read by the LVGL thread once the state is DONE.
-static volatile LONG openState = PLOT_EXPORT_IDLE;
-static wchar_t       openPaths[OPEN_PATHS_LEN];
-static HWND          openOwner;
+static atomic_int    openState = PLOT_EXPORT_IDLE;
 static TestData_t *  openTests[COMPARE_TESTS_MAX];
 static uint32_t      openTestCount;
 static uint32_t      openFailures;
@@ -450,8 +445,8 @@ static void chainConnEvent(lv_event_t * e);
 static void chainUpEvent(lv_event_t * e);
 static void chainDeleteEvent(lv_event_t * e);
 
-static unsigned __stdcall openThread(void * arg);
-static void openFile(const wchar_t * path);
+static void openThread(void * arg);
+static void openFile(const char * path, void * context);
 
 // ================================================================================================
 // ================================================================================================
@@ -3462,23 +3457,20 @@ static void openEvent(lv_event_t * e)
 {
   LV_UNUSED(e);
 
-  if (InterlockedCompareExchange(&openState, PLOT_EXPORT_BUSY, PLOT_EXPORT_IDLE) != PLOT_EXPORT_IDLE)
+  int idle = PLOT_EXPORT_IDLE;
+
+  if (!atomic_compare_exchange_strong(&openState, &idle, PLOT_EXPORT_BUSY))
   {
     return;
   }
 
-  openOwner = (HWND) lv_windows_get_display_window_handle(lv_display_get_default());
-
-  uintptr_t thread = _beginthreadex(NULL, 0, openThread, NULL, 0, NULL);
-
-  if (thread == 0)
+  if (!platformThreadStart(openThread, NULL))
   {
-    InterlockedExchange(&openState, PLOT_EXPORT_IDLE);
+    atomic_store(&openState, PLOT_EXPORT_IDLE);
     plotterToast(tr("Could not open the files."));
     return;
   }
 
-  CloseHandle((HANDLE) thread);
   lv_obj_set_state(openBtn, LV_STATE_DISABLED, true);
   lv_timer_create(openPollTimer, OPEN_POLL_MS, NULL);
 }
@@ -3488,7 +3480,7 @@ static void openPollTimer(lv_timer_t * tim)
   char     text[96];
   uint32_t added = 0;
 
-  if (InterlockedCompareExchange(&openState, PLOT_EXPORT_DONE, PLOT_EXPORT_DONE) != PLOT_EXPORT_DONE)
+  if (atomic_load(&openState) != PLOT_EXPORT_DONE)
   {
     return;
   }
@@ -3528,60 +3520,23 @@ static void openPollTimer(lv_timer_t * tim)
 
   openTestCount = 0;
   openFailures  = 0;
-  InterlockedExchange(&openState, PLOT_EXPORT_IDLE);
+  atomic_store(&openState, PLOT_EXPORT_IDLE);
 }
 
-// Multiple selection: the folder, then the file names, each ending with a 0 (one file: its path)
-static unsigned __stdcall openThread(void * arg)
+// Each file chosen is loaded here, in the dialog's thread (openFile)
+static void openThread(void * arg)
 {
+  PlatformFilter_t filter = {tr("CSV file"), "csv", tr("All files")};
+
   LV_UNUSED(arg);
-
-  openPaths[0] = L'\0';
-
-  // "\0" separated pairs: not a single text for tr()
-  if (appWindowFileDialog(openOwner, false, tr("Open tests"),
-                          (langGet() == LANG_FR) ? L"Fichier CSV (*.csv)\0*.csv\0Tous les fichiers (*.*)\0*.*\0"
-                                                 : L"CSV file (*.csv)\0*.csv\0All files (*.*)\0*.*\0",
-                          NULL, openPaths, OPEN_PATHS_LEN, OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT))
-  {
-    const wchar_t * folder = openPaths;
-    const wchar_t * name   = folder + wcslen(folder) + 1;
-
-    if (*name == L'\0')
-    {
-      openFile(folder);
-    }
-
-    while (*name != L'\0')
-    {
-      wchar_t path[MAX_PATH * 2];
-      size_t  folderLen = wcslen(folder);
-      size_t  nameLen   = wcslen(name);
-
-      if ((folderLen + nameLen + 2) <= (sizeof(path) / sizeof(path[0])))
-      {
-        wmemcpy(path, folder, folderLen);
-        path[folderLen] = L'\\';
-        wmemcpy(&path[folderLen + 1], name, nameLen + 1);
-        openFile(path);
-      }
-      else
-      {
-        openFailures++;
-      }
-
-      name += nameLen + 1;
-    }
-  }
-
-  InterlockedExchange(&openState, PLOT_EXPORT_DONE);
-  return 0;
+  platformOpenDialog(tr("Open tests"), &filter, true, openFile, NULL);
+  atomic_store(&openState, PLOT_EXPORT_DONE);
 }
 
 // The test takes the file's name
-static void openFile(const wchar_t * path)
+static void openFile(const char * path, void * context)
 {
-  FILE *       file = _wfopen(path, L"rb");
+  FILE *       file = platformFopen(path, "rb");
   TestData_t * test = NULL;
 
   if ((file != NULL) && (openTestCount < COMPARE_TESTS_MAX))
@@ -3600,10 +3555,18 @@ static void openFile(const wchar_t * path)
     return;
   }
 
-  const wchar_t * base = wcsrchr(path, L'\\');
-  char            name[OPEN_NAME_LEN];
+  // The name after the last separator (either kind: a Windows path may have both)
+  const char * base = path;
+  char         name[OPEN_NAME_LEN];
 
-  WideCharToMultiByte(CP_UTF8, 0, (base != NULL) ? (base + 1) : path, -1, name, sizeof(name), NULL, NULL);
+  LV_UNUSED(context);
+
+  for (const char * c = path; *c != '\0'; ++c)
+  {
+    base = ((*c == '\\') || (*c == '/')) ? (c + 1) : base;
+  }
+
+  snprintf(name, sizeof(name), "%s", base);
 
   char * extension = strrchr(name, '.');
 

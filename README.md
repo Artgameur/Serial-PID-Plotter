@@ -70,4 +70,6 @@ The environment variables are listed in `Inc/profile.h`.
 
 - `main.c`: window and LVGL setup, main loop.
 - `sources.cmake`: the engine's source list, shared by the app and by `agent/`.
-- `Src/`, `Inc/`: the engine (one `.c` / `.h` pair per module).
+- `Src/`, `Inc/`: the engine (one `.c` / `.h` pair per module). System calls go through
+  `platform.h` (`platform_win.c`); the window is `app_window.c`, the serial ports `serial_win.c`
+  with `serial_common.c` (receive queue).

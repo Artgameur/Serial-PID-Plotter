@@ -40,12 +40,14 @@ typedef enum
 // ================================================================================================
 // ================================================================================================
 
-// display: created by lv_windows_create_display() with simulator_mode = false (resizable).
-// The window can't be smaller than minWidth x minHeight UI pixels.
+// The app's window: app_window.c on Windows (LVGL's Windows driver), app_window_sdl.c on macOS and
+// Linux (LVGL's SDL driver). display: created by lv_windows_create_display() with simulator_mode
+// = false (resizable), or by lv_sdl_window_create(). The window can't be smaller than minWidth x
+// minHeight UI pixels.
 void appWindowInit(lv_display_t * display, int32_t minWidth, int32_t minHeight);
 
-// Pointer input device of the window (lv_windows_acquire_pointer_indev): quick clicks are not
-// lost when LVGL is busy
+// Pointer input device of the window (lv_windows_acquire_pointer_indev / lv_sdl_mouse_create):
+// quick clicks are not lost when LVGL is busy
 void appWindowSetPointer(lv_indev_t * pointer);
 
 // Called in the LVGL thread with the UI coordinates of a right click
@@ -73,15 +75,15 @@ void appWindowSetScale(int32_t percent);
 void appWindowSetMaxFps(uint32_t fps);
 
 // Window icon (title bar, taskbar, Alt+Tab) drawn in these colors (0xRRGGBB): rounded square in
-// background, signal trace in foreground. The .exe file keeps its built-in icon.
+// background, signal trace in foreground. The .exe file keeps its built-in icon. (Windows only.)
 void appWindowSetIconColors(uint32_t background, uint32_t foreground);
 
 // Title bar color and its title's color (0xRRGGBB, Windows 11); dark: dark caption buttons (and
-// a dark title bar on Windows 10, which does not support the colors)
+// a dark title bar on Windows 10, which does not support the colors). (Windows only.)
 void appWindowSetTitleBarColors(uint32_t caption, uint32_t text, bool dark);
 
-// Windows notification. The app has an icon in the notification area from the first one until it
-// closes: Windows needs one to show them.
+// System notification. Windows: the app has an icon in the notification area from the first one
+// until it closes (Windows needs one to show them). macOS: osascript; Linux: notify-send.
 void appWindowNotify(const char * title, const char * text);
 
 // Starts the app again in the same window position and size (ex: to show a loaded settings
@@ -91,14 +93,5 @@ void appWindowRestart(void);
 // Waits ms milliseconds, to within about a millisecond (main loop, between lv_timer_handler() calls)
 void appWindowWait(uint32_t ms);
 
-// Windows "Open" / "Save as" dialog, modal to owner (HWND of the app's window, read in the LVGL
-// thread: lv_windows_get_display_window_handle()). Blocks until it closes:
-// call it from a thread of its own (it sets up COM for it), not from the LVGL thread.
-// title: UTF-8. filter: "\0" separated pairs (L"CSV file (*.csv)\0*.csv\0"). defExt: added to a
-// name without one (NULL: none). path: default name in, chosen path out (pathLen characters; with
-// OFN_ALLOWMULTISELECT, the folder then the names). flags: OFN_xxx added to OFN_PATHMUSTEXIST |
-// OFN_NOCHANGEDIR | OFN_EXPLORER. false: canceled.
-bool appWindowFileDialog(void * owner, bool save, const char * title, const wchar_t * filter,
-                         const wchar_t * defExt, wchar_t * path, uint32_t pathLen, uint32_t flags);
 
 #endif //APP_WINDOW_H

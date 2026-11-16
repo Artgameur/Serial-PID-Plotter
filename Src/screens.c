@@ -9,18 +9,17 @@
 // ------------------------------------------------------------------------------------------------
 #include "screens.h"
 
-#include <process.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
-#include <commdlg.h>
 
 #include "lvgl.h"
 #include "app_window.h"
 #include "cmd_panel.h"
 #include "lang.h"
 #include "compare.h"
+#include "platform.h"
 #include "plotter.h"
 #include "profile.h"
 #include "serial.h"
@@ -205,11 +204,10 @@ static lv_obj_t *   fileExportBtn;
 static lv_obj_t *   fileImportBtn;
 
 // Save / open dialog of the setup files, in its own thread (the data keeps coming meanwhile)
-static HWND          fileDialogOwner;
 static bool          fileDialogSave;
-static wchar_t       fileDialogPath[MAX_PATH];
+static char          fileDialogPath[PLATFORM_PATH_LEN];
 static bool          fileDialogChosen;
-static volatile LONG fileDialogDone;
+static atomic_bool   fileDialogDone;
 static lv_group_t * settingsGroup;
 
 // Serial tab: terminal (received text waits in logPending until logFlushTimer)
@@ -245,7 +243,8 @@ static void profilesRefresh(const char * selectedName);
 static const char * profileSelected(void);
 static void profileNoteSet(const char * text);
 static void fileDialogStart(bool save);
-static unsigned __stdcall fileDialogThread(void * arg);
+static void fileDialogThread(void * arg);
+static void fileDialogPathSet(const char * path, void * context);
 static void fileDialogPollTimer(lv_timer_t * tim);
 static void fileExportEvent(lv_event_t * e);
 static void fileImportEvent(lv_event_t * e);
@@ -1973,53 +1972,48 @@ static void fileImportEvent(lv_event_t * e)
 
 static void fileDialogStart(bool save)
 {
-  fileDialogOwner = (HWND) lv_windows_get_display_window_handle(lv_display_get_default());
-  fileDialogSave  = save;
+  fileDialogSave = save;
 
   // Default name: what it holds
-  MultiByteToWideChar(CP_UTF8, 0, (lv_dropdown_get_selected(fileKindDropdown) == SETTINGS_FILE_LAYOUT) ?
-                      "serial_dashboard_layout.ini" : "serial_dashboard_setup.ini", -1, fileDialogPath, MAX_PATH);
+  snprintf(fileDialogPath, sizeof(fileDialogPath), "%s",
+           !save ? "" : ((lv_dropdown_get_selected(fileKindDropdown) == SETTINGS_FILE_LAYOUT) ?
+                         "serial_dashboard_layout.ini" : "serial_dashboard_setup.ini"));
 
-  if (!save)
+  if (platformThreadStart(fileDialogThread, NULL))
   {
-    fileDialogPath[0] = L'\0';
-  }
-
-  uintptr_t thread = _beginthreadex(NULL, 0, fileDialogThread, NULL, 0, NULL);
-
-  if (thread != 0)
-  {
-    CloseHandle((HANDLE) thread);
     lv_obj_set_state(fileExportBtn, LV_STATE_DISABLED, true);
     lv_obj_set_state(fileImportBtn, LV_STATE_DISABLED, true);
     lv_timer_create(fileDialogPollTimer, 200, NULL);
   }
 }
 
-static unsigned __stdcall fileDialogThread(void * arg)
+// One path: the settings file chosen to import
+static void fileDialogPathSet(const char * path, void * context)
 {
+  LV_UNUSED(context);
+  snprintf(fileDialogPath, sizeof(fileDialogPath), "%s", path);
+}
+
+static void fileDialogThread(void * arg)
+{
+  PlatformFilter_t filter = {tr("Settings"), "ini", tr("All files")};
+
   LV_UNUSED(arg);
 
-  // "\0" separated pairs: not a single text for tr()
-  fileDialogChosen = appWindowFileDialog(fileDialogOwner, fileDialogSave,
-                                         tr(fileDialogSave ? "Export the settings" : "Import settings"),
-                                         (langGet() == LANG_FR) ? L"Paramètres (*.ini)\0*.ini\0Tous les fichiers (*.*)\0*.*\0"
-                                                                : L"Settings (*.ini)\0*.ini\0All files (*.*)\0*.*\0",
-                                         L"ini", fileDialogPath, MAX_PATH,
-                                         fileDialogSave ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+  fileDialogChosen = fileDialogSave ? platformSaveDialog(tr("Export the settings"), &filter, fileDialogPath, sizeof(fileDialogPath))
+                                    : platformOpenDialog(tr("Import settings"), &filter, false, fileDialogPathSet, NULL);
 
-  InterlockedExchange(&fileDialogDone, 1);
-  return 0;
+  atomic_store(&fileDialogDone, true);
 }
 
 // The dialog closed: the file is written / read here, in the LVGL thread
 static void fileDialogPollTimer(lv_timer_t * tim)
 {
-  char               path[MAX_PATH * 3];
-  char               text[(MAX_PATH * 3) + 96];
+  char               text[PLATFORM_PATH_LEN + 96];
   SettingsFileKind_t kind = (SettingsFileKind_t) lv_dropdown_get_selected(fileKindDropdown);
+  const char *       path = fileDialogPath;
 
-  if (InterlockedExchange(&fileDialogDone, 0) == 0)
+  if (!atomic_exchange(&fileDialogDone, false))
   {
     return;
   }
@@ -2033,16 +2027,14 @@ static void fileDialogPollTimer(lv_timer_t * tim)
     return;
   }
 
-  WideCharToMultiByte(CP_UTF8, 0, fileDialogPath, -1, path, sizeof(path), NULL, NULL);
-
   if (fileDialogSave)
   {
-    snprintf(text, sizeof(text), tr(settingsFileExport(fileDialogPath, kind) ? "Saved: %s" : "Could not write %s"), path);
+    snprintf(text, sizeof(text), tr(settingsFileExport(path, kind) ? "Saved: %s" : "Could not write %s"), path);
     profileNoteSet(text);
     return;
   }
 
-  if (!settingsFileImport(fileDialogPath, &kind))
+  if (!settingsFileImport(path, &kind))
   {
     snprintf(text, sizeof(text), tr("%s is not a setup or plot layout file exported by the app."), path);
     profileNoteSet(text);

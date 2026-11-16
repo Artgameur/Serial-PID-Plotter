@@ -103,7 +103,11 @@
  *  - LV_OS_SDL2
  *  - LV_OS_CUSTOM
  */
+#ifdef _WIN32
 #define LV_USE_OS LV_OS_WINDOWS
+#else
+#define LV_USE_OS LV_OS_PTHREAD     /* macOS / Linux */
+#endif
 
 #if LV_USE_OS == LV_OS_CUSTOM
 /** Custom OS include header */
@@ -1805,7 +1809,11 @@
 #endif /*LV_USE_QNX*/
 
 /** Open a window on a PC desktop with SDL2 and read mouse and keyboard input. */
+#ifdef _WIN32
 #define LV_USE_SDL 0
+#else
+#define LV_USE_SDL 1               /* macOS / Linux: the app's window (app_window_sdl.c) */
+#endif
 
 #if LV_USE_SDL
 /** SDL include path */

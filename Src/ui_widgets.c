@@ -13,6 +13,7 @@
 #include <stdlib.h>
 
 #include "app_window.h"
+#include "platform.h"
 
 // ================================================================================================
 // ================================================================================================
@@ -20,8 +21,9 @@
 // ================================================================================================
 // ================================================================================================
 
-// Font with all the Latin letters (Montserrat has ASCII only), used for the missing ones
-#define FALLBACK_FONT_FILE    "\\Fonts\\segoeui.ttf"
+
+#define WHEEL_SCROLL_PX       48          // per wheel notch, at 100 % UI scale
+#define WHEEL_NOTCH           120         // wheel delta of a notch
 
 // Tooltips: shown after the pointer rests TOOLTIP_DELAY_MS on the same object (checked every
 // TOOLTIP_POLL_MS), below right of the pointer
@@ -174,13 +176,8 @@ const lv_font_t * uiFont(void)
   }
 
   // The TTF data must stay valid while the font is used: kept for the whole session
-  const char * windows = getenv("SystemRoot");
-  char         path[260];
-  FILE *       file;
-
-  snprintf(path, sizeof(path), "%s%s", ((windows != NULL) && (windows[0] != '\0')) ? windows : "C:\\Windows",
-           FALLBACK_FONT_FILE);
-  file = fopen(path, "rb");
+  char   path[PLATFORM_PATH_LEN];
+  FILE * file = platformFallbackFontPath(path, sizeof(path)) ? platformFopen(path, "rb") : NULL;
 
   if (file != NULL)
   {
@@ -424,6 +421,32 @@ void uiScrollbarShow(lv_obj_t * obj)
   lv_obj_set_style_bg_color(obj, lv_color_hex(COLOR_INFO), LV_PART_SCROLLBAR);
   lv_obj_set_style_bg_opa(obj, LV_OPA_60, LV_PART_SCROLLBAR);
   lv_obj_set_style_pad_right(obj, uiPx(2), LV_PART_SCROLLBAR);
+}
+
+void uiWheelScroll(lv_point_t point, int32_t delta)
+{
+  int32_t step = LV_MAX(1, (WHEEL_SCROLL_PX * (int32_t) lv_display_get_dpi(NULL)) / LV_DPI_DEF);
+  int32_t dy   = (delta * step) / WHEEL_NOTCH;
+
+  // Objects on the top layer (above the screen) first, then the screen (an open dropdown list is
+  // the screen's last child, so it is found before what is behind it)
+  lv_obj_t * hit = lv_indev_search_obj(lv_layer_top(), &point);
+
+  if (hit == NULL)
+  {
+    hit = lv_indev_search_obj(lv_screen_active(), &point);
+  }
+
+  for (lv_obj_t * obj = hit; obj != NULL; obj = lv_obj_get_parent(obj))
+  {
+    bool canScroll = (dy > 0) ? (lv_obj_get_scroll_top(obj) > 0) : (lv_obj_get_scroll_bottom(obj) > 0);
+
+    if (lv_obj_is_scrollable(obj) && canScroll)
+    {
+      lv_obj_scroll_by_bounded(obj, 0, dy, LV_ANIM_OFF);
+      return;
+    }
+  }
 }
 
 void uiKeypadGroupSet(lv_group_t * group)

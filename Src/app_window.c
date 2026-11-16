@@ -17,12 +17,12 @@
 #include <string.h>
 #include <windows.h>
 #include <windowsx.h>
-#include <commdlg.h>
 #include <dwmapi.h>
-#include <objbase.h>
 #include <shellapi.h>
 
 #include "lvgl.h"
+#include "platform.h"
+#include "ui_widgets.h"
 #include "src/drivers/windows/lv_windows_context.h"
 #include "profile.h"
 
@@ -38,7 +38,6 @@
 #define FPS_MAX               120
 #define INPUT_POLL_MS         20
 #define POINTER_READ_MS       10          // pointer read period (LVGL default: refresh period)
-#define WHEEL_SCROLL_PX       48          // per wheel notch, at 100 % UI scale
 #define WINDOW_ARG            "--window=" // x,y,width,height,maximized: window of the instance restarted
 #define APP_ICON_ID           1           // icon resource (Assets/app.rc)
 
@@ -176,7 +175,6 @@ static void    inputTimer(lv_timer_t * tim);
 static void    pointerRead(lv_indev_t * indev, lv_indev_data_t * data);
 static LPCWSTR cursorIdGet(LONG shape);
 static HCURSOR handCursorCreate(const char * const * art);
-static void    wheelScroll(lv_point_t point, int32_t delta);
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
 // ================================================================================================
@@ -261,6 +259,8 @@ void appWindowInit(lv_display_t * display, int32_t minWidth, int32_t minHeight)
   minUiWidth  = minWidth;
   minUiHeight = minHeight;
   appHwnd     = lv_windows_get_display_window_handle(display);
+  // The file dialogs are modal to the app's window
+  platformDialogOwnerSet(appHwnd);
   driverFlush = lv_display_get_flush_cb(display);
 
   if (driverFlush != NULL)
@@ -521,36 +521,6 @@ void appWindowSetMaxFps(uint32_t fps)
   {
     lv_timer_set_period(timer, 1000 / LV_CLAMP(FPS_MIN, fps, FPS_MAX));
   }
-}
-
-bool appWindowFileDialog(void * owner, bool save, const char * title, const wchar_t * filter,
-                         const wchar_t * defExt, wchar_t * path, uint32_t pathLen, uint32_t flags)
-{
-  // The Explorer style dialog uses COM
-  HRESULT       com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-  OPENFILENAMEW dialog = {0};
-  wchar_t       wideTitle[64];
-
-  // Unicode dialog: accents in the title and in the folder / file names
-  MultiByteToWideChar(CP_UTF8, 0, title, -1, wideTitle, sizeof(wideTitle) / sizeof(wideTitle[0]));
-
-  dialog.lStructSize = sizeof(dialog);
-  dialog.hwndOwner   = (HWND) owner;
-  dialog.lpstrFilter = filter;
-  dialog.lpstrFile   = path;
-  dialog.nMaxFile    = pathLen;
-  dialog.lpstrDefExt = defExt;
-  dialog.lpstrTitle  = wideTitle;
-  dialog.Flags       = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER | flags;
-
-  bool chosen = save ? GetSaveFileNameW(&dialog) : GetOpenFileNameW(&dialog);
-
-  if (SUCCEEDED(com))
-  {
-    CoUninitialize();
-  }
-
-  return chosen;
 }
 
 // ================================================================================================
@@ -860,35 +830,7 @@ static void inputTimer(lv_timer_t * tim)
   if (delta != 0)
   {
     lv_point_t point = {(int32_t) wheelX, (int32_t) wheelY};
-    wheelScroll(point, (int32_t) delta);
-  }
-}
-
-// Scrolls the nearest scrollable container under the pointer that has hidden content in the
-// wheel direction (ex: settings windows, terminal log)
-static void wheelScroll(lv_point_t point, int32_t delta)
-{
-  int32_t dy = (delta * LV_MAX(1, MulDiv(WHEEL_SCROLL_PX, (int) lv_display_get_dpi(appDisplay), LV_DPI_DEF))) /
-               WHEEL_DELTA;
-
-  // Objects on the top layer (above the screen) first, then the screen (an open dropdown list is
-  // the screen's last child, so it is found before what is behind it)
-  lv_obj_t * hit = lv_indev_search_obj(lv_layer_top(), &point);
-
-  if (hit == NULL)
-  {
-    hit = lv_indev_search_obj(lv_screen_active(), &point);
-  }
-
-  for (lv_obj_t * obj = hit; obj != NULL; obj = lv_obj_get_parent(obj))
-  {
-    bool canScroll = (dy > 0) ? (lv_obj_get_scroll_top(obj) > 0) : (lv_obj_get_scroll_bottom(obj) > 0);
-
-    if (lv_obj_is_scrollable(obj) && canScroll)
-    {
-      lv_obj_scroll_by_bounded(obj, 0, dy, LV_ANIM_OFF);
-      return;
-    }
+    uiWheelScroll(point, (int32_t) delta);
   }
 }
 

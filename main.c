@@ -9,10 +9,13 @@
 
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
+#define SDL_START_WIDTH 1280    // macOS / Linux: first window size (then the user's)
+#define SDL_START_HEIGHT 800
 
 int main()
 {
     lv_init();
+#ifdef _WIN32
     int32_t zoom_level = 100;
     bool allow_dpi_override = false;
     bool simulator_mode = false;
@@ -37,6 +40,20 @@ int main()
     // The driver's encoder is the mouse wheel: each step moved the focus to the next widget, which
     // closed an open dropdown. The wheel scrolls instead (app_window.c).
     lv_indev_enable(encoder_device, false);
+#else
+    // macOS / Linux: LVGL's SDL2 driver (app_window_sdl.c). No lv_sdl_mousewheel_create(): the
+    // wheel scrolls (app_window_sdl.c), it does not move the focus.
+    lv_display_t* display = lv_sdl_window_create(SDL_START_WIDTH, SDL_START_HEIGHT);
+    if (!display) return -1;
+    lv_sdl_window_set_resizeable(display, true);
+    lv_sdl_window_set_title(display, "Serial Dashboard");
+    appWindowInit(display, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_lock();
+    lv_indev_t* pointer_device = lv_sdl_mouse_create();
+    if (!pointer_device) return -1;
+    appWindowSetPointer(pointer_device);
+    if (!lv_sdl_keyboard_create()) return -1;
+#endif
     settingsInit();
     loadScreen();
     lv_unlock();
