@@ -315,7 +315,7 @@ brew install cmake sdl2 python
 # Debian / Ubuntu
 sudo apt install build-essential cmake python3 libsdl2-dev
 
-git clone --recurse-submodules <repo> && cd "Serial Dashboard"
+git clone --recurse-submodules https://github.com/Artgameur/Serial-PID-Plotter.git && cd Serial-PID-Plotter
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target serial_dashboard serial_dashboard_tests -j
 ./build/serial_dashboard_tests
