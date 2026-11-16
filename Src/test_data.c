@@ -664,6 +664,59 @@ bool testPlateauUpdate(TestPlateau_t * plateau, float value, uint32_t timeMs, fl
   return stable;
 }
 
+TestEnd_t testEndCheck(const TestExpr_t * condition, const TestData_t * test, int32_t watch, TestPlateau_t * plateau,
+                       float band, uint32_t windowMs, uint32_t smoothMs)
+{
+  if ((condition != NULL) && testExprIsTrue(condition, test))
+  {
+    return TEST_END_CONDITION;
+  }
+
+  if ((watch >= 0) && ((uint32_t) watch < test->columnCount) && (test->sampleCount > 0) && (windowMs > 0) &&
+      (band >= 0.0f))
+  {
+    uint32_t last = test->sampleCount - 1;
+
+    if (testPlateauUpdate(plateau, test->values[(last * test->columnCount) + (uint32_t) watch], test->times[last], band,
+                          windowMs, smoothMs))
+    {
+      return TEST_END_PLATEAU;
+    }
+  }
+
+  return TEST_END_NONE;
+}
+
+bool testTimeUp(uint32_t elapsedMs, uint32_t maxMs)
+{
+  return (maxMs > 0) && (elapsedMs >= maxMs);
+}
+
+uint32_t testSettledMs(const TestData_t * test, TestEnd_t end, uint32_t settledSamples, const TestPlateau_t * plateau)
+{
+  if (end == TEST_END_PLATEAU)
+  {
+    return plateau->startMs;
+  }
+
+  if (test->sampleCount == 0)
+  {
+    return 0;
+  }
+
+  if ((end == TEST_END_CONDITION) && (settledSamples > 0) && (test->sampleCount >= settledSamples))
+  {
+    return test->times[test->sampleCount - settledSamples];
+  }
+
+  return test->times[test->sampleCount - 1];
+}
+
+bool testEndNextInChain(TestEnd_t end)
+{
+  return (end == TEST_END_CONDITION) || (end == TEST_END_NOT_STABLE) || (end == TEST_END_PLATEAU);
+}
+
 TestExprError_t testExprCompile(TestExpr_t * expr, const char * text, const TestExprEnv_t * env, uint32_t * errorAt)
 {
   ExprParser_t parser = {expr, env, text, text, TEST_EXPR_OK, 0};

@@ -719,6 +719,168 @@ static void testPlateau(void)
 }
 
 // ================================================================================================
+//            End of a recorded test
+// ================================================================================================
+
+typedef struct
+{
+  const char * condition;                       // NULL: none
+  float        start;                           // the start handle
+  int32_t      watch;                           // Auto stable column, -1: off
+  float        band;
+  uint32_t     windowMs;                        // Auto stable time, 0: off
+  uint32_t     settledN;                        // N of the Settled stop, 0: custom condition
+} EndRule_t;
+
+// Records Setpoint = 20 and Temp = temp[s], one sample every stepMs, like the Compare tab: after
+// each sample, testEndCheck. Returns the end (TEST_END_NONE: never), index: its sample, settled:
+// testSettledMs.
+static TestEnd_t endRun(const EndRule_t * rule, const float * temp, uint32_t count, uint32_t stepMs, uint32_t * index,
+                        uint32_t * settled)
+{
+  TestData_t *  test = testDataCreate(2);
+  TestExpr_t    expr;
+  TestPlateau_t plateau;
+  TestEnd_t     end = TEST_END_NONE;
+  uint32_t      at;
+
+  snprintf(test->headers[0], TEST_HEADER_LEN, "Setpoint");
+  snprintf(test->headers[1], TEST_HEADER_LEN, "Temp");
+  memset(&plateau, 0, sizeof(plateau));
+
+  TestExprEnv_t env = {test->headers, 2, 0, 1, rule->band, rule->settledN, rule->start};
+  bool          hasCondition = (rule->condition != NULL) && (testExprCompile(&expr, rule->condition, &env, &at) == TEST_EXPR_OK);
+
+  *index   = count;
+  *settled = 0;
+
+  for (uint32_t s = 0; (s < count) && (end == TEST_END_NONE); ++s)
+  {
+    float row[2] = {20.0f, temp[s]};
+
+    testDataAppend(test, s * stepMs, row);
+    end = testEndCheck(hasCondition ? &expr : NULL, test, rule->watch, &plateau, rule->band, rule->windowMs, 0);
+
+    if (end != TEST_END_NONE)
+    {
+      *index   = s;
+      *settled = testSettledMs(test, end, rule->settledN, &plateau);
+    }
+  }
+
+  testDataFree(test);
+  return end;
+}
+
+static void testEnd(void)
+{
+  uint32_t index;
+  uint32_t settled;
+
+  // Custom condition: ends on the first sample where it is true
+  const float rising[] = {10.0f, 12.0f, 14.0f, 16.0f, 18.0f};
+  EndRule_t   custom   = {"Temp >= 14", NAN, -1, 0.5f, 0, 0};
+  CHECK(endRun(&custom, rising, 5, 1000, &index, &settled) == TEST_END_CONDITION);
+  CHECK((index == 2) && (settled == 2000));     // custom: settled = the last sample
+
+  // Never true, no Auto stable: does not end
+  EndRule_t never = {"Temp > 100", NAN, 1, 0.5f, 0, 0};
+  CHECK(endRun(&never, rising, 5, 1000, &index, &settled) == TEST_END_NONE);
+  EndRule_t none = {NULL, NAN, -1, 0.5f, 0, 0};
+  CHECK(endRun(&none, rising, 5, 1000, &index, &settled) == TEST_END_NONE);
+
+  // Settled stop (the Compare tab's condition): within band of the setpoint for N samples, settled
+  // at the first of them
+  const float settling[] = {10.0f, 15.0f, 19.6f, 20.2f, 19.8f, 20.1f};
+  EndRule_t   settledRule = {"held(abs(watch-ref)<=band,N)", NAN, -1, 0.5f, 0, 3};
+  CHECK(endRun(&settledRule, settling, 6, 1000, &index, &settled) == TEST_END_CONDITION);
+  CHECK((index == 4) && (settled == 2000));
+  // Out of the band again before N samples: starts over
+  const float bounce[] = {19.9f, 20.1f, 21.0f, 20.0f, 20.0f, 20.0f};
+  CHECK(endRun(&settledRule, bounce, 6, 1000, &index, &settled) == TEST_END_CONDITION);
+  CHECK((index == 5) && (settled == 3000));
+
+  // start: the watched value at the start of this test (compare.c recompiles the condition once
+  // its first sample is in); with no value yet (NAN), the condition is never true
+  EndRule_t moved = {"abs(watch-start) >= 5", 10.0f, -1, 0.5f, 0, 0};
+  CHECK(endRun(&moved, rising, 5, 1000, &index, &settled) == TEST_END_CONDITION);
+  CHECK(index == 3);
+  moved.start = NAN;
+  CHECK(endRun(&moved, rising, 5, 1000, &index, &settled) == TEST_END_NONE);
+
+  // Auto stable alone: ends once Temp stopped changing, settled where its blocks start
+  float flat[200];
+  for (uint32_t s = 0; s < 200; ++s)
+  {
+    flat[s] = (s < 50) ? (10.0f + (float) s * 0.2f) : 20.0f;   // ramp for 5 s, then flat
+  }
+  EndRule_t stable = {NULL, NAN, 1, 0.1f, 3000, 0};
+  CHECK(endRun(&stable, flat, 200, 100, &index, &settled) == TEST_END_PLATEAU);
+  CHECK((index * 100 > 5000) && (index * 100 <= 9100) && (settled >= 5000) && (settled < index * 100));
+  uint32_t plateauIndex = index;
+
+  // Off: no watched column, no time, or no band
+  stable.watch = -1;
+  CHECK(endRun(&stable, flat, 200, 100, &index, &settled) == TEST_END_NONE);
+  stable.watch    = 1;
+  stable.windowMs = 0;
+  CHECK(endRun(&stable, flat, 200, 100, &index, &settled) == TEST_END_NONE);
+  stable.windowMs = 3000;
+  stable.band     = -1.0f;
+  CHECK(endRun(&stable, flat, 200, 100, &index, &settled) == TEST_END_NONE);
+  stable.band = 0.1f;
+
+  // The condition and the plateau on the same sample: the condition wins
+  char sameSample[32];
+  snprintf(sameSample, sizeof(sameSample), "n >= %lu", (unsigned long) (plateauIndex + 1));
+  stable.condition = sameSample;
+  CHECK(endRun(&stable, flat, 200, 100, &index, &settled) == TEST_END_CONDITION);
+  CHECK(index == plateauIndex);
+
+  // Watched values missing: no plateau
+  float gaps[200];
+  for (uint32_t s = 0; s < 200; ++s)
+  {
+    gaps[s] = NAN;
+  }
+  stable.condition = NULL;
+  CHECK(endRun(&stable, gaps, 200, 100, &index, &settled) == TEST_END_NONE);
+
+  // Max test time (0: no limit)
+  CHECK(!testTimeUp(0, 0) && !testTimeUp(100000, 0));
+  CHECK(!testTimeUp(999, 1000) && testTimeUp(1000, 1000) && testTimeUp(1001, 1000));
+
+  // Settled time of the other ends; fewer samples than N: the last one
+  const float  three[] = {1.0f, 2.0f, 3.0f};
+  TestData_t * test    = testMake(three, three, 3);
+  TestPlateau_t unused;
+  memset(&unused, 0, sizeof(unused));
+  CHECK(testSettledMs(test, TEST_END_CONDITION, 5, &unused) == 2000);
+  CHECK(testSettledMs(test, TEST_END_STOPPED, 2, &unused) == 2000);
+  CHECK(testSettledMs(test, TEST_END_NOT_STABLE, 2, &unused) == 2000);
+  CHECK(testSettledMs(test, TEST_END_CONDITION, 2, &unused) == 1000);
+  testDataFree(test);
+  TestData_t * empty = testDataCreate(1);
+  CHECK(testSettledMs(empty, TEST_END_CONDITION, 3, &unused) == 0);
+  CHECK(testSettledMs(empty, TEST_END_STOPPED, 0, &unused) == 0);
+
+  // Full memory: the sample after TEST_SAMPLES_MAX is refused (the recording ends, TEST_END_FULL)
+  bool all = true;
+  for (uint32_t s = 0; s < TEST_SAMPLES_MAX; ++s)
+  {
+    float value = (float) s;
+    all = all && testDataAppend(empty, s, &value);
+  }
+  float extra = 0.0f;
+  CHECK(all && !testDataAppend(empty, TEST_SAMPLES_MAX, &extra) && (empty->sampleCount == TEST_SAMPLES_MAX));
+  testDataFree(empty);
+
+  // A chain goes on after these ends only
+  CHECK(testEndNextInChain(TEST_END_CONDITION) && testEndNextInChain(TEST_END_NOT_STABLE) && testEndNextInChain(TEST_END_PLATEAU));
+  CHECK(!testEndNextInChain(TEST_END_STOPPED) && !testEndNextInChain(TEST_END_FULL) && !testEndNextInChain(TEST_END_NONE));
+}
+
+// ================================================================================================
 //            Commands and settings of a test
 // ================================================================================================
 
@@ -1093,6 +1255,7 @@ int main(int argc, char ** argv)
   testCurve();
   testCurveExact();
   testPlateau();
+  testEnd();
   testCommands();
   testLineParser();
   testSettings();

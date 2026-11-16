@@ -62,6 +62,17 @@ typedef enum
   TEST_EXPR_ERROR_LENGTH,                 // too many terms
 } TestExprError_t;
 
+// How a recorded test ended
+typedef enum
+{
+  TEST_END_NONE,                          // being recorded, or not recorded here
+  TEST_END_CONDITION,
+  TEST_END_STOPPED,                       // Stop button
+  TEST_END_FULL,                          // TEST_SAMPLES_MAX or out of memory
+  TEST_END_NOT_STABLE,                    // max test time passed
+  TEST_END_PLATEAU,                       // stopped changing (Auto stable)
+} TestEnd_t;
+
 // ================================================================================================
 // ================================================================================================
 //            STRUCTURE DECLARATION
@@ -186,6 +197,22 @@ float testBandUnits(float tolerancePercent, float percentPerUnit);
 // also a high peak and the lower end a low one, or a steady drift would have no peaks. At least 3
 // blocks (smoothMs 0: exactly 3). Samples without a value are ignored.
 bool testPlateauUpdate(TestPlateau_t * plateau, float value, uint32_t timeMs, float band, uint32_t windowMs, uint32_t smoothMs);
+
+// After each sample of a recording (testDataAppend): TEST_END_CONDITION when condition (NULL: none)
+// is true, else TEST_END_PLATEAU when column watch stopped changing (testPlateauUpdate; off when
+// watch < 0, windowMs 0 or band < 0), else TEST_END_NONE.
+TestEnd_t testEndCheck(const TestExpr_t * condition, const TestData_t * test, int32_t watch, TestPlateau_t * plateau,
+                       float band, uint32_t windowMs, uint32_t smoothMs);
+
+// Max test time passed (maxMs 0: no limit)
+bool testTimeUp(uint32_t elapsedMs, uint32_t maxMs);
+
+// When the test settled, ms from its start: Settled stop (settledSamples N > 0) ended by its
+// condition: the first of the N last samples; plateau: the start of its blocks; else the last sample.
+uint32_t testSettledMs(const TestData_t * test, TestEnd_t end, uint32_t settledSamples, const TestPlateau_t * plateau);
+
+// A chain goes on to its next test after this end (not after Stop or a full memory)
+bool testEndNextInChain(TestEnd_t end);
 
 // Compiles a condition; errorAt receives the place of the error in text
 TestExprError_t testExprCompile(TestExpr_t * expr, const char * text, const TestExprEnv_t * env, uint32_t * errorAt);

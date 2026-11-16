@@ -138,16 +138,6 @@ _Static_assert(TEST_HEADER_LEN == PLOT_EXPORT_HEADER_LEN, "same column names");
 // ================================================================================================
 // ================================================================================================
 
-typedef enum
-{
-  END_NONE,                               // being recorded, or not recorded here
-  END_CONDITION,
-  END_STOPPED,
-  END_FULL,
-  END_NOT_STABLE,                         // max test time passed
-  END_PLATEAU,                            // stopped changing (Auto stable)
-} TestEnd_t;
-
 typedef struct
 {
   TestData_t * data;
@@ -156,7 +146,7 @@ typedef struct
   TestEnd_t    end;
   uint32_t     settledMs;                 // start of the N last samples (settled condition)
   lv_obj_t *   infoLabel;                 // on the test's row
-  float        plateauValue;              // where it stopped changing (END_PLATEAU)
+  float        plateauValue;              // where it stopped changing (TEST_END_PLATEAU)
   bool         nameIsCommand;             // named after its command: not in the legend
 } Entry_t;
 
@@ -513,7 +503,7 @@ void compareTestStart(const char * command, uint32_t conn)
 
   if (recording >= 0)
   {
-    recordFinish(END_STOPPED);
+    recordFinish(TEST_END_STOPPED);
   }
 
   if (entryCount >= COMPARE_TESTS_MAX)
@@ -547,7 +537,7 @@ void compareTestStart(const char * command, uint32_t conn)
   test->startMs = appWindowClockMs();
   snprintf(test->commands, TEST_COMMANDS_LEN, "%s", command);
 
-  if (!entryAdd(test, END_NONE))
+  if (!entryAdd(test, TEST_END_NONE))
   {
     testDataFree(test);
     return;
@@ -642,7 +632,7 @@ void compareSampleAdd(const float * row, uint32_t tick)
 
   if (!testDataAppend(test, timeMs, values))
   {
-    recordFinish(END_FULL);
+    recordFinish(TEST_END_FULL);
     return;
   }
 
@@ -652,20 +642,19 @@ void compareSampleAdd(const float * row, uint32_t tick)
 
   int32_t watch = testDataColumnFind(test, watchName);
 
-  // The value to come back to before the next test
+  // The value to come back to before the next test, and the start of this one in its condition
   if ((watch >= 0) && (test->sampleCount == 1))
   {
     chainStartValue = values[watch];
+    conditionUpdate();
   }
 
-  if (conditionValid && testExprIsTrue(&condition, test))
+  TestEnd_t end = testEndCheck(conditionValid ? &condition : NULL, test, watch, &plateau, conditionBand, plateauMs(),
+                               plateauSmoothMs());
+
+  if (end != TEST_END_NONE)
   {
-    recordFinish(END_CONDITION);
-  }
-  else if ((watch >= 0) && (plateauMs() > 0) && (conditionBand >= 0.0f) &&
-           testPlateauUpdate(&plateau, values[watch], timeMs, conditionBand, plateauMs(), plateauSmoothMs()))
-  {
-    recordFinish(END_PLATEAU);
+    recordFinish(end);
   }
 }
 
@@ -707,7 +696,7 @@ _Static_assert((COMPARE_CLI_TESTS_MAX == COMPARE_TESTS_MAX) && (COMPARE_CLI_GRAP
 
 bool compareCliTestAdd(TestData_t * test, bool named)
 {
-  if (!entryAdd(test, END_NONE))
+  if (!entryAdd(test, TEST_END_NONE))
   {
     return false;
   }
@@ -821,7 +810,7 @@ void compareCliTestStop(void)
 {
   if (recording >= 0)
   {
-    recordFinish(END_STOPPED);
+    recordFinish(TEST_END_STOPPED);
   }
 }
 
@@ -1343,19 +1332,12 @@ static void recordFinish(TestEnd_t end)
   TestData_t * test  = entry->data;
   char         text[TEST_NAME_LEN + 64];
   double       seconds = (test->sampleCount > 0) ? (test->times[test->sampleCount - 1] / 1000.0) : 0.0;
+  bool         settled = lv_dropdown_get_selected(stopDropdown) == STOP_SETTLED;
 
-  // Settled: since the first of the N last samples
-  entry->settledMs = seconds > 0.0 ? test->times[test->sampleCount - 1] : 0;
+  entry->settledMs = testSettledMs(test, end, settled ? conditionSamples : 0, &plateau);
 
-  if ((end == END_CONDITION) && (lv_dropdown_get_selected(stopDropdown) == STOP_SETTLED) &&
-      (test->sampleCount >= conditionSamples))
+  if (end == TEST_END_PLATEAU)
   {
-    entry->settledMs = test->times[test->sampleCount - conditionSamples];
-  }
-
-  if (end == END_PLATEAU)
-  {
-    entry->settledMs    = plateau.startMs;
     entry->plateauValue = plateau.value;
   }
 
@@ -1367,19 +1349,19 @@ static void recordFinish(TestEnd_t end)
   statusUpdate();
   conditionUpdate();
 
-  if (end == END_CONDITION)
+  if (end == TEST_END_CONDITION)
   {
     snprintf(text, sizeof(text), tr("Test ended (condition met) after %.1f s: %s"), seconds, test->name);
   }
-  else if (end == END_FULL)
+  else if (end == TEST_END_FULL)
   {
     snprintf(text, sizeof(text), tr("Test ended, its memory is full, after %.1f s: %s"), seconds, test->name);
   }
-  else if (end == END_NOT_STABLE)
+  else if (end == TEST_END_NOT_STABLE)
   {
     snprintf(text, sizeof(text), tr("Test not stable after %.1f s: %s"), seconds, test->name);
   }
-  else if (end == END_PLATEAU)
+  else if (end == TEST_END_PLATEAU)
   {
     snprintf(text, sizeof(text), tr("Test stopped changing at %.2f after %.1f s: %s"), (double) entry->plateauValue, seconds, test->name);
   }
@@ -1390,10 +1372,10 @@ static void recordFinish(TestEnd_t end)
 
   plotterToast(text);
 
-  chainAdvance = (chainIndex >= 0) && ((end == END_CONDITION) || (end == END_NOT_STABLE) || (end == END_PLATEAU));
+  chainAdvance = (chainIndex >= 0) && testEndNextInChain(end);
 
   // In a chain, once when all of it ends; stopped by hand, the person is there
-  if ((end != END_STOPPED) && !chainAdvance)
+  if ((end != TEST_END_STOPPED) && !chainAdvance)
   {
     benchNotify(text);
   }
@@ -2144,15 +2126,15 @@ static void entryInfoUpdate(uint32_t i)
   {
     snprintf(text, sizeof(text), tr("Recording, %.1f s"), seconds);
   }
-  else if (entry->end == END_CONDITION)
+  else if (entry->end == TEST_END_CONDITION)
   {
     snprintf(text, sizeof(text), tr("Reached at %.1f s, %lu samples"), entry->settledMs / 1000.0, (unsigned long) test->sampleCount);
   }
-  else if (entry->end == END_NOT_STABLE)
+  else if (entry->end == TEST_END_NOT_STABLE)
   {
     snprintf(text, sizeof(text), tr("Not stable after %.1f s, %lu samples"), seconds, (unsigned long) test->sampleCount);
   }
-  else if (entry->end == END_PLATEAU)
+  else if (entry->end == TEST_END_PLATEAU)
   {
     snprintf(text, sizeof(text), tr("Stable at %.2f from %.1f s, %lu samples"), (double) entry->plateauValue,
              entry->settledMs / 1000.0, (unsigned long) test->sampleCount);
@@ -3056,9 +3038,9 @@ static void refreshTimer(lv_timer_t * tim)
   }
 
   // Here and not on each sample: it also ends a test that receives nothing
-  if ((recording >= 0) && (testMaxMs() > 0) && (lv_tick_elaps(recordStartTick) >= testMaxMs()))
+  if ((recording >= 0) && testTimeUp(lv_tick_elaps(recordStartTick), testMaxMs()))
   {
-    recordFinish(END_NOT_STABLE);
+    recordFinish(TEST_END_NOT_STABLE);
   }
 
   if (recording >= 0)
@@ -3084,7 +3066,7 @@ static void recordEvent(lv_event_t * e)
 
   if (recording >= 0)
   {
-    recordFinish(END_STOPPED);
+    recordFinish(TEST_END_STOPPED);
   }
   else
   {
@@ -3249,7 +3231,7 @@ static void testDeleteEvent(lv_event_t * e)
 
   if ((int32_t) i == recording)
   {
-    recordFinish(END_STOPPED);
+    recordFinish(TEST_END_STOPPED);
   }
 
   testDataFree(entries[i].data);
@@ -3294,7 +3276,7 @@ static void captureEvent(lv_event_t * e)
   struct tm local = *localtime(&now);
 
   snprintf(test->name, TEST_NAME_LEN, "%s %02d:%02d:%02d", tr("Plot"), local.tm_hour, local.tm_min, local.tm_sec);
-  entryAdd(test, END_NONE);
+  entryAdd(test, TEST_END_NONE);
   namesRefresh(false);
   selectionDefault();
   testsListRebuild();
@@ -3329,7 +3311,7 @@ static void chainRunEvent(lv_event_t * e)
   {
     if (recording >= 0)
     {
-      recordFinish(END_STOPPED);
+      recordFinish(TEST_END_STOPPED);
     }
     else
     {
@@ -3490,7 +3472,7 @@ static void openPollTimer(lv_timer_t * tim)
 
   for (uint32_t i = 0; i < openTestCount; ++i)
   {
-    if (entryAdd(openTests[i], END_NONE))
+    if (entryAdd(openTests[i], TEST_END_NONE))
     {
       // The file's name holds the command: its settings say more
       entries[entryCount - 1].nameIsCommand = openTests[i]->settings[0] != '\0';
