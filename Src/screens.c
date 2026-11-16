@@ -1,6 +1,6 @@
 // ------------------------------------------------------------------------------------------------
 /*!@file
-   @brief Serial Dashboard UI: port / data format settings, send / receive terminal, plotter
+   @brief Serial PID Plotter UI: port / data format settings, send / receive terminal, plotter
           (see plotter.c) and its variable settings.
 
    @author artgameur
@@ -58,7 +58,7 @@
 #define CONN_MAX              PLOTTER_MAX_CONNS
 
 // Help panel: who made the app (same as the sources' headers)
-#define APP_NAME              "Serial Dashboard"
+#define APP_NAME              "Serial PID Plotter"
 #define APP_AUTHOR            "Author: artgameur"
 #define APP_COPYRIGHT         "Copyright (c) 2026 artgameur. MIT License."
 #define CONN_LINE_MAX         512
@@ -455,7 +455,7 @@ static void topBarInit(lv_obj_t * parent)
   lv_led_set_color(statusLed, lv_color_hex(COLOR_CONNECTED));
 
   lv_obj_t * title = lv_label_create(bar);
-  lv_label_set_text(title, "Serial Dashboard");
+  lv_label_set_text(title, APP_NAME);
 
   statusLabel = lv_label_create(bar);
   lv_obj_set_flex_grow(statusLabel, 1);

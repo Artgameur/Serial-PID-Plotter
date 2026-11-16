@@ -20,7 +20,7 @@ int main()
     bool allow_dpi_override = false;
     bool simulator_mode = false;
     lv_display_t* display = lv_windows_create_display(
-        L"Serial Dashboard",
+        L"Serial PID Plotter",
         SCREEN_WIDTH, SCREEN_HEIGHT,
         zoom_level, allow_dpi_override, simulator_mode);
     if (!display) return -1;
@@ -46,7 +46,7 @@ int main()
     lv_display_t* display = lv_sdl_window_create(SDL_START_WIDTH, SDL_START_HEIGHT);
     if (!display) return -1;
     lv_sdl_window_set_resizeable(display, true);
-    lv_sdl_window_set_title(display, "Serial Dashboard");
+    lv_sdl_window_set_title(display, "Serial PID Plotter");
     appWindowInit(display, SCREEN_WIDTH, SCREEN_HEIGHT);
     lv_lock();
     lv_indev_t* pointer_device = lv_sdl_mouse_create();

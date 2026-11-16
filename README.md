@@ -1,4 +1,4 @@
-# Serial Dashboard
+# Serial PID Plotter
 
 Windows desktop app (C, LVGL; macOS / Linux versions not tested yet) for devices that send numbers over a serial / USB VCOM port:
 
@@ -38,8 +38,11 @@ cmake --build cmake-build --target serial_dashboard
 The executable is created under:
 
 ```text
-cmake-build\serial_dashboard.exe
+cmake-build\Serial_PID_Plotter.exe
 ```
+
+(The CMake target keeps the name `serial_dashboard`. The settings stay in the `SerialDashboard`
+folder, so settings from older versions are kept.)
 
 The command line tool: `agent\build_cli.bat` (output in `agent\dist`).
 
@@ -83,7 +86,7 @@ git clone --recurse-submodules <repo> && cd "Serial Dashboard"
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target serial_dashboard serial_dashboard_tests -j
 ./build/serial_dashboard_tests
-./build/serial_dashboard
+./build/Serial_PID_Plotter
 ```
 
 - Serial ports: macOS `/dev/cu.*`, Linux `/dev/ttyUSB*`, `ttyACM*`, `ttyAMA*` and real `ttyS*`.

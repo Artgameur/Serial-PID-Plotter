@@ -1,6 +1,6 @@
 # serial_dashboard_cli
 
-Command line version of Serial Dashboard, for driving a real device over a serial port. It is used here for PID tests of a fridge: it sends commands, reads the replies and data, records tests with stop conditions, runs chains of tests, and saves CSV files and report pictures.
+Command line version of Serial PID Plotter, for driving a real device over a serial port. It is used here for PID tests of a fridge: it sends commands, reads the replies and data, records tests with stop conditions, runs chains of tests, and saves CSV files and report pictures.
 
 It runs the app's own engine with the user's saved app settings, so it behaves like the app: variable names and units, the line format, stop conditions, chains with Prepare / Start when, device settings in the legend, and the test bench. The tool never saves those settings, so the user's app setup cannot change.
 
@@ -8,7 +8,7 @@ Windows x64 only. One file, nothing to install.
 
 ## Rules
 
-- **The port is exclusive.** While the Serial Dashboard app is connected to the device, the session cannot open the port, and the reverse is also true. Ask the user to disconnect or close the app first.
+- **The port is exclusive.** While the Serial PID Plotter app is connected to the device, the session cannot open the port, and the reverse is also true. Ask the user to disconnect or close the app first.
 - **Commands act on real hardware.** `send`, `test-start`, `chain-run` and Prepare commands change the device, such as its setpoint or gains. Only send what the user asked for or approved.
 - **Always `stop` the session when done.** It keeps the port open until then. It also stops by itself after 60 minutes without a command (`--idle`), unless a test is running.
 - **Every command prints one JSON object.** Check `"ok"`. Exit codes: `0` ok, `1` refused by the session (see `error`), `2` bad arguments, `5` no session running.

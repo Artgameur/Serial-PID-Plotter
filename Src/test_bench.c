@@ -62,7 +62,7 @@
 #define BENCH_TEXT_SCREEN_PX  14          // text on screen (before uiPx)
 #define BENCH_METERS_PER_INCH 0.0254
 #define BENCH_NUMBER_WIDTH    uiPx(72)
-#define BENCH_NOTIFY_TITLE    "Serial Dashboard"
+#define BENCH_NOTIFY_TITLE    "Serial PID Plotter"
 #define BENCH_PICTURE_JOBS    2           // pictures encoded at once in the background (each holds
                                           // its snapshot, up to 6000 x 6000 x 4 bytes); more: on
                                           // the LVGL thread, as before

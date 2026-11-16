@@ -67,7 +67,7 @@ typedef struct
 // ================================================================================================
 
 static const char usageText[] =
-  "serial_dashboard_cli: Serial Dashboard for AI agents. See AGENT.md.\n"
+  "serial_dashboard_cli: Serial PID Plotter for AI agents. See AGENT.md.\n"
   "\n"
   "Session (the app's engine in the background, holding the serial port):\n"
   "  start [--connect COM5] [--baud N] [--profile NAME | --settings FILE | --clean]\n"
@@ -430,7 +430,7 @@ static void testsLoad(void)
 
     if (tests[t].data == NULL)
     {
-      fail(EXIT_CSV, "%s is not a CSV file exported by Serial Dashboard (or there is not enough memory).", tests[t].path);
+      fail(EXIT_CSV, "%s is not a CSV file exported by Serial PID Plotter (or there is not enough memory).", tests[t].path);
     }
 
     if (tests[t].label != NULL)

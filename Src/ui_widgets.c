@@ -1,6 +1,6 @@
 // ------------------------------------------------------------------------------------------------
 /*!@file
-   @brief Small widget helpers and colors shared by the Serial Dashboard screens.
+   @brief Small widget helpers and colors shared by the Serial PID Plotter screens.
 
    @author artgameur
    @version 1.0

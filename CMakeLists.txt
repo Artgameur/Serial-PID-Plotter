@@ -19,6 +19,7 @@ include(sources.cmake)
 
 # WIN32: a Windows program (no console window); ignored on macOS / Linux
 add_executable(serial_dashboard WIN32 main.c ${APP_SOURCES})
+set_target_properties(serial_dashboard PROPERTIES OUTPUT_NAME Serial_PID_Plotter)
 
 target_include_directories(serial_dashboard PRIVATE ${APP_INCLUDE_DIRS})
 target_compile_options(serial_dashboard PRIVATE ${APP_WARNINGS})
