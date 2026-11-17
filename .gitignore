@@ -12,6 +12,7 @@ agent/dist/
 *.a
 *.lib
 *.exe
+!bin/Serial_PID_Plotter.exe
 *.dll
 *.pdb
 *.map

@@ -23,7 +23,11 @@ Windows 10 / 11, written in C with [LVGL](https://lvgl.io). macOS and Linux vers
 
 ## Quick start
 
-1. Unzip the release and run `Serial_PID_Plotter.exe`. Nothing to install.
+1. Download `Serial_PID_Plotter.exe` (Windows x64) from the
+   [Releases](https://github.com/Artgameur/Serial-PID-Plotter/releases) page (the zip also has the
+   command line tool), or take it from [`bin/`](bin/) in this repo. Run it: nothing to install.
+   Windows may warn "Windows protected your PC" the first time (the exe is not code-signed): click
+   **More info**, then **Run anyway**.
 2. **Serial** tab: choose the port and the baud rate, then **Connect**.
 3. Make the device print one line of numbers per sample, for example:
 
